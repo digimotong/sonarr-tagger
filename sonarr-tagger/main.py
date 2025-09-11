@@ -48,13 +48,12 @@ class SonarrAPI:
             logging.error("Failed to fetch tags: %s", str(e))
             raise
 
-    def create_tag(self, label: str, color: str = "#808080") -> Dict:
+    def create_tag(self, label: str) -> Dict:
         """Create a new tag in Sonarr"""
         endpoint = f"{self.base_url}/api/v3/tag"
         try:
             response = self.session.post(endpoint, json={
-                'label': label,
-                'color': color
+                'label': label
             })
             response.raise_for_status()
             return response.json()
@@ -161,13 +160,7 @@ class TagUpdateData:
     has_4k: bool
     has_motong: bool
 
-SCORE_TAGS = {
-    'negative_score': '#ff0000',
-    'positive_score': '#00ff00',
-    'no_score': '#808080',
-    'motong': '#800080',
-    '4k': '#0000ff'
-}
+REQUIRED_TAGS = ['negative_score', 'positive_score', 'no_score', 'motong', '4k']
 
 def _process_episode_files(api: SonarrAPI, show_id: int) -> tuple:
     """Process episode files and return min_score, has_4k, has_motong"""
@@ -197,7 +190,7 @@ def _update_show_tags(data: TagUpdateData) -> bool:
     """Update tags for a show based on collected data"""
     show_update = data.sonarr.show.copy()
     new_tag_ids = [tag_id for tag_id in data.tags.current_tags
-                  if not any(tag['id'] == tag_id and tag['label'] in SCORE_TAGS
+                  if not any(tag['id'] == tag_id and tag['label'] in REQUIRED_TAGS
                            for tag in data.sonarr.api.get_tags())]
 
     new_tag_name = get_score_tag(data.scores.min_score, data.scores.score_threshold)
@@ -236,10 +229,10 @@ def ensure_required_tags(api: SonarrAPI) -> Dict:
     all_tags = api.get_tags()
     tag_map = {tag['label']: tag['id'] for tag in all_tags}
 
-    for tag, color in SCORE_TAGS.items():
+    for tag in REQUIRED_TAGS:
         if tag not in tag_map:
             logging.info("Creating missing tag: %s", tag)
-            new_tag = api.create_tag(tag, color)
+            new_tag = api.create_tag(tag)
             tag_map[tag] = new_tag['id']
 
     return tag_map
