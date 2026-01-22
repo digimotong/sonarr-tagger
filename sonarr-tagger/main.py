@@ -109,7 +109,8 @@ def get_config_from_env():
         'log_level': os.getenv('LOG_LEVEL', 'INFO'),
         'score_threshold': int(os.getenv('SCORE_THRESHOLD', '100')),
         'tag_motong_enabled': os.getenv('TAG_MOTONG', 'false').lower() == 'true',
-        'tag_4k_enabled': os.getenv('TAG_4K', 'false').lower() == 'true'
+        'tag_4k_enabled': os.getenv('TAG_4K', 'false').lower() == 'true',
+        'tag_mixed_release_groups_enabled': os.getenv('TAG_MIXED_RELEASE_GROUPS', 'false').lower() == 'true'
     }
 
     # Validate required fields
@@ -130,7 +131,7 @@ def get_score_tag(score: int, threshold: int) -> str:
         return "positive_score"
     return "no_score"
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 @dataclass
 class SonarrContext:
@@ -159,17 +160,40 @@ class TagUpdateData:
     scores: ScoreContext
     has_4k: bool
     has_motong: bool
+    has_mixed_release_groups: bool
 
-REQUIRED_TAGS = ['negative_score', 'positive_score', 'no_score', 'motong', '4k']
+REQUIRED_TAGS = ['negative_score', 'positive_score', 'no_score', 'motong', '4k', 'mixed_release_groups']
 
-def _process_episode_files(api: SonarrAPI, show_id: int) -> tuple:
-    """Process episode files and return min_score, has_4k, has_motong"""
+def _process_episode_files(api: SonarrAPI, show_id: int, check_mixed_release_groups: bool = False) -> tuple:
+    """Process episode files and return min_score, has_4k, has_motong, has_mixed_release_groups"""
     min_score = None
     has_4k = False
     has_motong = False
+    has_mixed_release_groups = False
 
     try:
         episode_files = api.get_episode_files(show_id)
+
+        if check_mixed_release_groups:
+            # Group episodes by season and track release groups per season
+            season_release_groups = {}
+            for ep_file in episode_files:
+                season_number = ep_file.get('seasonNumber')
+                if season_number is None or season_number == 0:  # Skip Specials (season 0)
+                    continue
+
+                release_group = ep_file.get('releaseGroup', '')
+                # Treat empty string as a valid release group
+                if season_number not in season_release_groups:
+                    season_release_groups[season_number] = set()
+                season_release_groups[season_number].add(release_group)
+
+            # Check if any season has more than one unique release group
+            for release_groups in season_release_groups.values():
+                if len(release_groups) > 1:
+                    has_mixed_release_groups = True
+                    break
+
         for ep_file in episode_files:
             ep_score = ep_file.get('customFormatScore')
             if min_score is None or (ep_score is not None and ep_score < min_score):
@@ -184,7 +208,7 @@ def _process_episode_files(api: SonarrAPI, show_id: int) -> tuple:
     except RequestException:
         logging.warning("Failed to get episode files for show %s", show_id)
 
-    return min_score, has_4k, has_motong
+    return min_score, has_4k, has_motong, has_mixed_release_groups
 
 def _update_show_tags(data: TagUpdateData) -> bool:
     """Update tags for a show based on collected data"""
@@ -200,6 +224,8 @@ def _update_show_tags(data: TagUpdateData) -> bool:
         new_tag_ids.append(data.tags.tag_map['motong'])
     if data.has_4k and data.sonarr.config['tag_4k_enabled']:
         new_tag_ids.append(data.tags.tag_map['4k'])
+    if data.has_mixed_release_groups and data.sonarr.config['tag_mixed_release_groups_enabled']:
+        new_tag_ids.append(data.tags.tag_map['mixed_release_groups'])
 
     if set(new_tag_ids) != data.tags.current_tags:
         show_update['tags'] = new_tag_ids
@@ -214,13 +240,16 @@ def process_show_tags(
         config: Dict) -> bool:
     """Process and update tags for a single show"""
     current_tags = set(show.get('tags', []))
-    min_score, has_4k, has_motong = _process_episode_files(api, show['id'])
+    min_score, has_4k, has_motong, has_mixed_release_groups = _process_episode_files(
+        api, show['id'], config['tag_mixed_release_groups_enabled']
+    )
     update_data = TagUpdateData(
         sonarr=SonarrContext(api=api, show=show, config=config),
         tags=TagContext(current_tags=current_tags, tag_map=tag_map),
         scores=ScoreContext(min_score=min_score, score_threshold=score_threshold),
         has_4k=has_4k,
-        has_motong=has_motong
+        has_motong=has_motong,
+        has_mixed_release_groups=has_mixed_release_groups
     )
     return _update_show_tags(update_data)
 
