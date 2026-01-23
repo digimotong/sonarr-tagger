@@ -110,7 +110,9 @@ def get_config_from_env():
         'score_threshold': int(os.getenv('SCORE_THRESHOLD', '100')),
         'tag_motong_enabled': os.getenv('TAG_MOTONG', 'false').lower() == 'true',
         'tag_4k_enabled': os.getenv('TAG_4K', 'false').lower() == 'true',
-        'tag_mixed_release_groups_enabled': os.getenv('TAG_MIXED_RELEASE_GROUPS', 'false').lower() == 'true'
+        'tag_mixed_release_groups_enabled': os.getenv(
+            'TAG_MIXED_RELEASE_GROUPS', 'false'
+        ).lower() == 'true'
     }
 
     # Validate required fields
