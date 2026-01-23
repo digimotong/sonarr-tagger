@@ -14,6 +14,7 @@ Automatically updates show tags in Sonarr based on custom format scores, release
   - `4k` when ANY episode file has 2160p resolution (configurable via TAG_4K env var)
  
 - **Release group tagging**:
+  - `mixed_release_groups` when ANY season (excluding Specials/season 0) has episodes with multiple different release groups (configurable via TAG_MIXED_RELEASE_GROUPS env var)
   - `motong` when ANY episode file has release group "motong" (configurable via TAG_MOTONG env var)
 
 ## Containerized Deployment
@@ -29,13 +30,14 @@ services:
     depends_on:
       - sonarr
     environment:
-      SONARR_URL: http://sonarr:8989  # Sonarr instance URL
-      SONARR_API_KEY: your-api-key    # Sonarr API key (required)
-      LOG_LEVEL: INFO                 # DEBUG, INFO, WARNING, ERROR
-      SCORE_THRESHOLD: 100            # Threshold for positive_score
-      INTERVAL_MINUTES: 20            # Minutes between runs
-      # TAG_4K: true                  # Enable 4k tagging
-      # TAG_MOTONG: true              # Enable motong tagging
+      SONARR_URL: http://sonarr:8989    # Sonarr instance URL
+      SONARR_API_KEY: your-api-key      # Sonarr API key (required)
+      LOG_LEVEL: INFO                   # DEBUG, INFO, WARNING, ERROR
+      SCORE_THRESHOLD: 100              # Threshold for positive_score
+      INTERVAL_MINUTES: 20              # Minutes between runs
+      # TAG_4K: true                    # Enable 4k tagging
+      # TAG_MIXED_RELEASE_GROUPS: true  # Enable mixed_release_groups tagging
+      # TAG_MOTONG: true                # Enable motong tagging
 ```
 
 ### Required Environment Variables
@@ -53,6 +55,7 @@ services:
 | `SCORE_THRESHOLD` | `100` | Score threshold for positive_score tag |
 | `INTERVAL_MINUTES` | `20` | Minutes between automatic runs |
 | `TAG_4K` | `false` | Enable 4k resolution tagging |
+| `TAG_MIXED_RELEASE_GROUPS` | `false` | Enable mixed release groups tagging |
 | `TAG_MOTONG` | `false` | Enable motong release group tagging |
 
 ## Tag Management
@@ -65,6 +68,7 @@ The application automatically creates and manages these tags:
 | positive_score | LOWEST episode score > threshold |
 | no_score | No score or 0 ≤ score ≤ threshold |
 | 4k | ANY episode file is 2160p (requires TAG_4K=true) |
+| mixed_release_groups | ANY season (excluding Specials/season 0) has episodes with multiple different release groups (requires TAG_MIXED_RELEASE_GROUPS=true) |
 | motong | ANY episode file contains "motong" (requires TAG_MOTONG=true) |
 
 Tags are created automatically if they don't exist in Sonarr.
