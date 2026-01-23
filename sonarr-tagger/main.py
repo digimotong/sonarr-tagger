@@ -164,9 +164,20 @@ class TagUpdateData:
     has_motong: bool
     has_mixed_release_groups: bool
 
-REQUIRED_TAGS = ['negative_score', 'positive_score', 'no_score', 'motong', '4k', 'mixed_release_groups']
+REQUIRED_TAGS = [
+    'negative_score',
+    'positive_score',
+    'no_score',
+    'motong',
+    '4k',
+    'mixed_release_groups'
+]
 
-def _process_episode_files(api: SonarrAPI, show_id: int, check_mixed_release_groups: bool = False) -> tuple:
+def _process_episode_files(
+        api: SonarrAPI,
+        show_id: int,
+        check_mixed_release_groups: bool = False
+) -> tuple:
     """Process episode files and return min_score, has_4k, has_motong, has_mixed_release_groups"""
     min_score = None
     has_4k = False
