@@ -87,6 +87,32 @@ class SonarrAPI:
                 str(e))
             return False
 
+    def get_episodes(self, series_id: int) -> List[Dict]:
+        """Fetch all episodes for a show from Sonarr"""
+        endpoint = f"{self.base_url}/api/v3/episode?seriesId={series_id}"
+        try:
+            response = self.session.get(endpoint)
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            logging.error("Failed to fetch episodes for series %s: %s", series_id, str(e))
+            raise
+
+    def update_episode(self, episode_id: int, episode_data: Dict) -> bool:
+        """Update an episode in Sonarr"""
+        endpoint = f"{self.base_url}/api/v3/episode/{episode_id}"
+        try:
+            response = self.session.put(endpoint, json=episode_data)
+            response.raise_for_status()
+            return True
+        except RequestException as e:
+            logging.error(
+                "Failed to update episode %s. Response: %s. Error: %s",
+                episode_id,
+                response.text if 'response' in locals() else '',
+                str(e))
+            return False
+
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
@@ -112,6 +138,9 @@ def get_config_from_env():
         'tag_4k_enabled': os.getenv('TAG_4K', 'false').lower() == 'true',
         'tag_mixed_release_groups_enabled': os.getenv(
             'TAG_MIXED_RELEASE_GROUPS', 'false'
+        ).lower() == 'true',
+        'monitor_existing_specials_enabled': os.getenv(
+            'MONITOR_EXISTING_SPECIALS', 'false'
         ).lower() == 'true'
     }
 
@@ -133,7 +162,7 @@ def get_score_tag(score: int, threshold: int) -> str:
         return "positive_score"
     return "no_score"
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 @dataclass
 class SonarrContext:
@@ -266,6 +295,56 @@ def process_show_tags(
     )
     return _update_show_tags(update_data)
 
+def monitor_existing_specials(api: SonarrAPI, show: Dict, config: Dict) -> int:
+    """Check specials (season 0) for a show and update episodes that exist on disk to monitored.
+    
+    Returns the number of episodes updated.
+    """
+    if not config['monitor_existing_specials_enabled']:
+        return 0
+
+    try:
+        episodes = api.get_episodes(show['id'])
+    except RequestException:
+        logging.warning("Failed to get episodes for show %s", show['id'])
+        return 0
+
+    updated_count = 0
+    for episode in episodes:
+        # Filter for season 0 episodes that have a file but are not monitored
+        if (episode.get('seasonNumber') == 0 and
+            episode.get('hasFile', False) and
+            not episode.get('monitored', True)):
+
+            # Create a copy of the episode data with monitored set to True
+            episode_update = episode.copy()
+            episode_update['monitored'] = True
+
+            if api.update_episode(episode['id'], episode_update):
+                updated_count += 1
+                logging.debug(
+                    "Updated special episode %s (S%02dE%02d) to monitored for show %s",
+                    episode['id'],
+                    episode.get('seasonNumber', 0),
+                    episode.get('episodeNumber', 0),
+                    show['title']
+                )
+            else:
+                logging.warning(
+                    "Failed to update special episode %s for show %s",
+                    episode['id'],
+                    show['title']
+                )
+
+    if updated_count > 0:
+        logging.info(
+            "Updated %s special episode(s) to monitored for show %s",
+            updated_count,
+            show['title']
+        )
+
+    return updated_count
+
 def ensure_required_tags(api: SonarrAPI) -> Dict:
     """Ensure required tags exist and return tag name to ID mapping"""
     all_tags = api.get_tags()
@@ -303,12 +382,17 @@ def main():
                 shows = shows[:5]
                 logging.info("TEST MODE: Processing first 5 shows only")
 
-            updated_count = sum(
-                1 for show in shows
-                if process_show_tags(api, show, tag_map, config['score_threshold'], config)
-            )
+            updated_count = 0
+            specials_updated_count = 0
+
+            for show in shows:
+                if process_show_tags(api, show, tag_map, config['score_threshold'], config):
+                    updated_count += 1
+                specials_updated_count += monitor_existing_specials(api, show, config)
 
             logging.info("Processing complete. Updated %s/%s shows", updated_count, len(shows))
+            if config['monitor_existing_specials_enabled']:
+                logging.info("Updated %s special episode(s) to monitored", specials_updated_count)
             logging.info("Next run in %s minutes", interval_minutes)
             time.sleep(interval_minutes * 60)
 
