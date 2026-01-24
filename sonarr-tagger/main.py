@@ -162,7 +162,7 @@ def get_score_tag(score: int, threshold: int) -> str:
         return "positive_score"
     return "no_score"
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 @dataclass
 class SonarrContext:
