@@ -17,6 +17,9 @@ Automatically updates show tags in Sonarr based on custom format scores, release
   - `mixed_release_groups` when ANY season (excluding Specials/season 0) has episodes with multiple different release groups (configurable via TAG_MIXED_RELEASE_GROUPS env var)
   - `motong` when ANY episode file has release group "motong" (configurable via TAG_MOTONG env var)
 
+- **Special episode monitoring**:
+  - Automatically monitors existing specials (season 0) that have files on disk but are not monitored (configurable via MONITOR_EXISTING_SPECIALS env var)
+
 ## Containerized Deployment
 
 The application is designed to run in Docker with Sonarr. Here's a sample compose configuration:
@@ -38,6 +41,7 @@ services:
       # TAG_4K: true                    # Enable 4k tagging
       # TAG_MIXED_RELEASE_GROUPS: true  # Enable mixed_release_groups tagging
       # TAG_MOTONG: true                # Enable motong tagging
+      # MONITOR_EXISTING_SPECIALS: true # Enable monitoring of existing specials
 ```
 
 ### Required Environment Variables
@@ -57,6 +61,7 @@ services:
 | `TAG_4K` | `false` | Enable 4k resolution tagging |
 | `TAG_MIXED_RELEASE_GROUPS` | `false` | Enable mixed release groups tagging |
 | `TAG_MOTONG` | `false` | Enable motong release group tagging |
+| `MONITOR_EXISTING_SPECIALS` | `false` | Enable monitoring of existing specials (season 0) that have files on disk |
 
 ## Tag Management
 
