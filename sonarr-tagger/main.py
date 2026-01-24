@@ -139,7 +139,9 @@ def get_config_from_env():
         'tag_mixed_release_groups_enabled': os.getenv(
             'TAG_MIXED_RELEASE_GROUPS', 'false'
         ).lower() == 'true',
-        'monitor_existing_specials_enabled': os.getenv('MONITOR_EXISTING_SPECIALS', 'false').lower() == 'true'
+        'monitor_existing_specials_enabled': os.getenv(
+            'MONITOR_EXISTING_SPECIALS', 'false'
+        ).lower() == 'true'
     }
 
     # Validate required fields
