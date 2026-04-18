@@ -155,14 +155,14 @@ def get_config_from_env():
 def get_score_tag(score: int, threshold: int) -> str:
     """Determine the appropriate score tag based on customFormatScore"""
     if score is None:
-        return "no_score"
+        return "no-score"
     if score < 0:
-        return "negative_score"
+        return "negative-score"
     if score > threshold:
-        return "positive_score"
-    return "no_score"
+        return "positive-score"
+    return "no-score"
 
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 @dataclass
 class SonarrContext:
@@ -194,12 +194,12 @@ class TagUpdateData:
     has_mixed_release_groups: bool
 
 REQUIRED_TAGS = [
-    'negative_score',
-    'positive_score',
-    'no_score',
+    'negative-score',
+    'positive-score',
+    'no-score',
     'motong',
     '4k',
-    'mixed_release_groups'
+    'mixed-release-groups'
 ]
 
 def _process_episode_files(
@@ -267,7 +267,7 @@ def _update_show_tags(data: TagUpdateData) -> bool:
     if data.has_4k and data.sonarr.config['tag_4k_enabled']:
         new_tag_ids.append(data.tags.tag_map['4k'])
     if data.has_mixed_release_groups and data.sonarr.config['tag_mixed_release_groups_enabled']:
-        new_tag_ids.append(data.tags.tag_map['mixed_release_groups'])
+        new_tag_ids.append(data.tags.tag_map['mixed-release-groups'])
 
     if set(new_tag_ids) != data.tags.current_tags:
         show_update['tags'] = new_tag_ids
