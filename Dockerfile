@@ -1,7 +1,7 @@
 # Pinned to the Debian suite this tag currently resolves to. The bare
 # python:3.12-slim tag has already rolled bookworm -> trixie once; pinning keeps
 # the base from changing under a rebuild without a visible diff.
-FROM python:3.12-slim-trixie
+FROM python:3.14-slim-trixie
 
 # docker logs is the only observability surface for this container, so stdout
 # must never be buffered - otherwise logs appear in bursts or are lost on kill.
