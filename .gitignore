@@ -13,5 +13,10 @@
 !sonarr-tagger
 !sonarr-tagger/*
 !requirements.txt
+!requirements-dev.txt
 !Dockerfile
 !.pylintrc
+!pytest.ini
+!conftest.py
+!tests
+!tests/*
