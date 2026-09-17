@@ -18,7 +18,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
-  lint:
+  # Prefixed "release-" to keep job names unique across workflows: tests.yml also
+  # defines `lint` and `test`, and GitHub warns that a check name shared by two
+  # workflows gives ambiguous results for required status checks - which can block
+  # PRs from ever merging. Renaming here (not in tests.yml) keeps the checks that
+  # gate `main` named exactly as they are today.
+  release-lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -32,7 +37,7 @@ jobs:
       - name: Run pylint
         run: pylint sonarr-tagger
 
-  test:
+  release-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -66,7 +71,7 @@ jobs:
 
   build-and-push:
     runs-on: ubuntu-latest
-    needs: [lint, test, verify-version]
+    needs: [release-lint, release-test, verify-version]
     # workflow_dispatch skips verify-version, and a skipped need would otherwise
     # cause this job to be skipped too.
     if: always() && !failure() && !cancelled()
