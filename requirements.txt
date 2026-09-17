@@ -1,1 +1,4 @@
-requests>=2.25.1
+# Pinned: this is the only runtime dependency, and the Dockerfile pins its base
+# image for the same reason - an unpinned build silently resolves a different
+# version every time, so two images built from the same commit can differ.
+requests==2.34.2

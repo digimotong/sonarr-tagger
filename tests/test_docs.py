@@ -156,3 +156,53 @@ def _read_source():
     path = os.path.join(REPO_ROOT, 'sonarr-tagger', 'main.py')
     with open(path, encoding='utf-8') as handle:
         return handle.read()
+
+class TestDependencyPinning:
+    """Runtime dependencies must be pinned, for the same reason the base image is.
+
+    An unpinned requirement makes the build non-reproducible: two images built
+    from the same commit can contain different library versions, so a bug that
+    appears after a rebuild is far harder to attribute. The Dockerfile already
+    argues this case for the base image - this keeps the Python dependency
+    consistent with that reasoning.
+    """
+
+    def _requirement_lines(self, filename):
+        """Yield the meaningful (non-comment, non-blank, non-include) lines."""
+        path = os.path.join(REPO_ROOT, filename)
+        with open(path, encoding='utf-8') as handle:
+            for line in handle:
+                stripped = line.split('#')[0].strip()
+                if stripped and not stripped.startswith('-r'):
+                    yield stripped
+
+    def test_runtime_requirements_are_all_pinned(self):
+        """Every runtime requirement must use ==, not >= or a bare name."""
+        lines = list(self._requirement_lines('requirements.txt'))
+        assert lines, 'requirements.txt should not be empty'
+        for line in lines:
+            assert '==' in line, (
+                f"Unpinned runtime requirement: {line!r}. Pin it with == so the "
+                "build is reproducible.")
+
+    def test_dev_requirements_are_all_pinned(self):
+        """Dev tooling is pinned too, so local runs match CI."""
+        for line in self._requirement_lines('requirements-dev.txt'):
+            assert '==' in line, (
+                f"Unpinned dev requirement: {line!r}. Pin it with == so local "
+                "runs resolve the same versions as CI.")
+
+    def test_pinned_requests_matches_installed_version(self):
+        """The pin must describe a version that actually resolves.
+
+        A pin to a nonexistent release would fail the build rather than the test
+        suite, so this catches a typo here instead of in CI.
+        """
+        import requests
+
+        pins = dict(
+            line.split('==') for line in self._requirement_lines('requirements.txt'))
+        assert pins['requests'] == requests.__version__, (
+            f"requirements.txt pins requests=={pins['requests']} but the "
+            f"installed version is {requests.__version__}. The pin is either "
+            "stale or a typo.")

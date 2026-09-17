@@ -1,4 +1,6 @@
 -r requirements.txt
-pytest>=8.0
-pytest-cov>=6.0
-pylint>=4.0
+# Test tooling pinned to match CI's interpreter (Python 3.12/3.13) so a local run
+# and a CI run resolve the same versions. pytest 9 requires Python >= 3.9.
+pytest==9.1.1
+pytest-cov==7.1.0
+pylint==4.0.8
