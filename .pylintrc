@@ -3,3 +3,15 @@ disable=missing-module-docstring,
         missing-class-docstring,
         missing-function-docstring,
         too-few-public-methods
+
+[BASIC]
+# Module-level constants are conventionally UPPER_CASE; pylint's default
+# const-naming-style only accepts an optional leading underscore, so list the
+# names explicitly rather than weakening variable-rgx for everything.
+good-names=VERSION,
+           REQUEST_TIMEOUT,
+           REQUIRED_ENV_VARS,
+           REQUIRED_TAGS,
+           MIN_INTERVAL_MINUTES,
+           MAX_INTERVAL_MINUTES,
+           VALID_LOG_LEVELS

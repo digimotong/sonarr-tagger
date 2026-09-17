@@ -14,23 +14,56 @@ from typing import Dict, List, Optional, Set
 import requests
 from requests.exceptions import RequestException
 
+# Single source of truth for the tags this tool manages (creates and assigns).
+# Any tag in this list is stripped from every show before the current desired
+# state is applied, and created on demand when missing from Sonarr.
+# NOTE: 'motong', '4k' and 'mixed-release-groups' are only re-applied when
+# TAG_MOTONG / TAG_4K / TAG_MIXED_RELEASE_GROUPS are enabled, so disabling a
+# flag also removes that tag from all shows.
+REQUIRED_TAGS = [
+    'negative-score',
+    'positive-score',
+    'no-score',
+    'motong',
+    '4k',
+    'mixed-release-groups'
+]
+
+# HTTP calls block indefinitely when no timeout is supplied, which would leave the
+# long-running update loop wedged forever on a half-open connection.
+REQUEST_TIMEOUT = 30
+
+# Environment variables that must be present and non-empty for the tool to run.
+REQUIRED_ENV_VARS = ('SONARR_URL', 'SONARR_API_KEY')
+
+# Bounds for INTERVAL_MINUTES. A zero/negative interval turns the poll loop into
+# an unbounded busy loop (time.sleep(0) returns instantly), and an absurd value
+# silently stops the container from ever updating again. Reject both at startup.
+MIN_INTERVAL_MINUTES = 1
+MAX_INTERVAL_MINUTES = 525_600  # one year
+
+# Log levels accepted in LOG_LEVEL, as a case-insensitive lookup.
+VALID_LOG_LEVELS = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+
 class SonarrAPI:
     """Client for Sonarr API interactions"""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str,
+                 session: requests.Session = None):
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
-        self.session = requests.Session()
-        self.session.headers.update({
-            'X-Api-Key': self.api_key,
-            'Accept': 'application/json'
-        })
+        self.session = session if session is not None else requests.Session()
+        if hasattr(self.session, 'headers'):
+            self.session.headers.update({
+                'X-Api-Key': self.api_key,
+                'Accept': 'application/json'
+            })
 
     def get_shows(self) -> List[Dict]:
         """Fetch all shows from Sonarr"""
         endpoint = f"{self.base_url}/api/v3/series"
         try:
-            response = self.session.get(endpoint)
+            response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -41,7 +74,7 @@ class SonarrAPI:
         """Fetch all tags from Sonarr"""
         endpoint = f"{self.base_url}/api/v3/tag"
         try:
-            response = self.session.get(endpoint)
+            response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -54,7 +87,7 @@ class SonarrAPI:
         try:
             response = self.session.post(endpoint, json={
                 'label': label
-            })
+            }, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -65,7 +98,7 @@ class SonarrAPI:
         """Fetch all episode files for a show from Sonarr"""
         endpoint = f"{self.base_url}/api/v3/episodefile?seriesId={series_id}"
         try:
-            response = self.session.get(endpoint)
+            response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -76,7 +109,8 @@ class SonarrAPI:
         """Update a show in Sonarr"""
         endpoint = f"{self.base_url}/api/v3/series/{series_id}"
         try:
-            response = self.session.put(endpoint, json=series_data)
+            response = self.session.put(endpoint, json=series_data,
+                                        timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return True
         except RequestException as e:
@@ -91,7 +125,7 @@ class SonarrAPI:
         """Fetch all episodes for a show from Sonarr"""
         endpoint = f"{self.base_url}/api/v3/episode?seriesId={series_id}"
         try:
-            response = self.session.get(endpoint)
+            response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -102,7 +136,8 @@ class SonarrAPI:
         """Update an episode in Sonarr"""
         endpoint = f"{self.base_url}/api/v3/episode/{episode_id}"
         try:
-            response = self.session.put(endpoint, json=episode_data)
+            response = self.session.put(endpoint, json=episode_data,
+                                        timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return True
         except RequestException as e:
@@ -127,13 +162,69 @@ def parse_args():
         help='Show version and exit')
     return parser.parse_args()
 
+def get_log_level() -> str:
+    """Return the validated LOG_LEVEL, falling back to INFO.
+
+    An unrecognised level would otherwise reach ``logging.basicConfig`` and raise
+    a bare ``ValueError`` from deep inside the stdlib; rejecting it here names the
+    offending variable and the accepted values.
+    """
+    raw_level = os.getenv('LOG_LEVEL', 'INFO').strip()
+    level = raw_level.upper()
+    if level not in VALID_LOG_LEVELS:
+        raise ValueError(
+            f"Invalid LOG_LEVEL {raw_level!r}. Expected one of: "
+            f"{', '.join(VALID_LOG_LEVELS)}")
+    return level
+
+def get_interval_minutes() -> int:
+    """Return the validated INTERVAL_MINUTES, defaulting to 20.
+
+    Guards against the two ways this value silently breaks the poll loop: a
+    non-positive value makes ``time.sleep()`` return immediately (a busy loop that
+    hammers the Sonarr API), and a non-integer or absurd value either crashes the
+    container on startup or stops it from ever updating at full speed again.
+    """
+    raw_interval = os.getenv('INTERVAL_MINUTES', '20').strip()
+    try:
+        interval = int(raw_interval)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid INTERVAL_MINUTES {raw_interval!r}. Expected an integer "
+            f"between {MIN_INTERVAL_MINUTES} and {MAX_INTERVAL_MINUTES}.") from exc
+
+    if not MIN_INTERVAL_MINUTES <= interval <= MAX_INTERVAL_MINUTES:
+        raise ValueError(
+            f"Invalid INTERVAL_MINUTES {interval}. Expected an integer between "
+            f"{MIN_INTERVAL_MINUTES} and {MAX_INTERVAL_MINUTES}.")
+
+    return interval
+
 def get_config_from_env():
     """Load configuration from environment variables"""
+    # Fail fast with a message that names the culprits: indexing os.environ directly
+    # raised an unhelpful KeyError traceback, and an empty value was only caught
+    # later by the explicit check below with a vaguer message.
+    missing = [name for name in REQUIRED_ENV_VARS
+               if not os.getenv(name, '').strip()]
+    if missing:
+        raise ValueError(
+            "Missing required environment variables: "
+            + ", ".join(f"{name} must be set" for name in missing))
+
+    try:
+        score_threshold = int(os.getenv('SCORE_THRESHOLD', '100'))
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid SCORE_THRESHOLD {os.getenv('SCORE_THRESHOLD')!r}. "
+            "Expected an integer.") from exc
+
     config = {
         'sonarr_url': os.environ['SONARR_URL'],
         'sonarr_api_key': os.environ['SONARR_API_KEY'],
-        'log_level': os.getenv('LOG_LEVEL', 'INFO'),
-        'score_threshold': int(os.getenv('SCORE_THRESHOLD', '100')),
+        'log_level': get_log_level(),
+        'score_threshold': score_threshold,
+        'interval_minutes': get_interval_minutes(),
         'tag_motong_enabled': os.getenv('TAG_MOTONG', 'false').lower() == 'true',
         'tag_4k_enabled': os.getenv('TAG_4K', 'false').lower() == 'true',
         'tag_mixed_release_groups_enabled': os.getenv(
@@ -143,11 +234,6 @@ def get_config_from_env():
             'MONITOR_EXISTING_SPECIALS', 'false'
         ).lower() == 'true'
     }
-
-    # Validate required fields
-    if not config['sonarr_url'] or not config['sonarr_api_key']:
-        raise ValueError("Missing required environment variables: "
-                       "SONARR_URL and SONARR_API_KEY must be set")
 
     logging.debug("Config loaded from environment successfully")
     return config
@@ -192,15 +278,6 @@ class TagUpdateData:
     has_4k: bool
     has_motong: bool
     has_mixed_release_groups: bool
-
-REQUIRED_TAGS = [
-    'negative-score',
-    'positive-score',
-    'no-score',
-    'motong',
-    '4k',
-    'mixed-release-groups'
-]
 
 def _process_episode_files(
         api: SonarrAPI,
@@ -255,9 +332,11 @@ def _process_episode_files(
 def _update_show_tags(data: TagUpdateData) -> bool:
     """Update tags for a show based on collected data"""
     show_update = data.sonarr.show.copy()
+    # Fetch tags once instead of calling get_tags() for every existing tag on the
+    # show (that was an N+1: one HTTP round-trip per tag, per show, every cycle).
+    managed_tag_ids = set(data.tags.tag_map.values())
     new_tag_ids = [tag_id for tag_id in data.tags.current_tags
-                  if not any(tag['id'] == tag_id and tag['label'] in REQUIRED_TAGS
-                           for tag in data.sonarr.api.get_tags())]
+                  if tag_id not in managed_tag_ids]
 
     new_tag_name = get_score_tag(data.scores.min_score, data.scores.score_threshold)
     new_tag_ids.append(data.tags.tag_map[new_tag_name])
@@ -358,6 +437,34 @@ def ensure_required_tags(api: SonarrAPI) -> Dict:
 
     return tag_map
 
+def run_once(api: SonarrAPI, config: Dict, test_mode: bool = False) -> int:
+    """Run a single update pass over all shows and return the number of shows updated.
+
+    Extracted from ``main()`` so a full cycle can be exercised in tests without the
+    surrounding ``while True`` loop. ``test_mode`` mirrors the ``--test`` flag and
+    limits the pass to the first 5 shows.
+    """
+    tag_map = ensure_required_tags(api)
+    shows = api.get_shows()
+
+    if test_mode:
+        shows = shows[:5]
+        logging.info("TEST MODE: Processing first 5 shows only")
+
+    updated_count = 0
+    specials_updated_count = 0
+
+    for show in shows:
+        if process_show_tags(api, show, tag_map, config['score_threshold'], config):
+            updated_count += 1
+        specials_updated_count += monitor_existing_specials(api, show, config)
+
+    logging.info("Processing complete. Updated %s/%s shows", updated_count, len(shows))
+    if config['monitor_existing_specials_enabled']:
+        logging.info("Updated %s special episode(s) to monitored", specials_updated_count)
+
+    return updated_count
+
 def main():
     """Main execution flow"""
     args = parse_args()
@@ -366,33 +473,29 @@ def main():
         print(f"Sonarr Tag Updater v{VERSION}")
         sys.exit(0)
 
-    config = get_config_from_env()
+    # Fail fast on bad configuration: without this the tool started up, logged a
+    # generic "Starting" line, and only then died - or worse, ran the poll loop with
+    # a bad interval. A clear message and a non-zero exit is what a container
+    # supervisor needs to report the misconfiguration.
+    try:
+        config = get_config_from_env()
+    except ValueError as e:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s')
+        logging.error("Configuration error: %s", str(e))
+        sys.exit(1)
+
     setup_logging(config['log_level'])
     logging.info("Starting Sonarr Tag Updater v%s", VERSION)
 
     api = SonarrAPI(config['sonarr_url'], config['sonarr_api_key'])
-    interval_minutes = int(os.getenv('INTERVAL_MINUTES', '20'))
+    interval_minutes = config['interval_minutes']
 
     while True:
         try:
-            tag_map = ensure_required_tags(api)
-            shows = api.get_shows()
+            run_once(api, config, test_mode=args.test)
 
-            if args.test:
-                shows = shows[:5]
-                logging.info("TEST MODE: Processing first 5 shows only")
-
-            updated_count = 0
-            specials_updated_count = 0
-
-            for show in shows:
-                if process_show_tags(api, show, tag_map, config['score_threshold'], config):
-                    updated_count += 1
-                specials_updated_count += monitor_existing_specials(api, show, config)
-
-            logging.info("Processing complete. Updated %s/%s shows", updated_count, len(shows))
-            if config['monitor_existing_specials_enabled']:
-                logging.info("Updated %s special episode(s) to monitored", specials_updated_count)
             logging.info("Next run in %s minutes", interval_minutes)
             time.sleep(interval_minutes * 60)
 
