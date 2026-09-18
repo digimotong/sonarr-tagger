@@ -12,6 +12,13 @@ updates:
       actions:
         patterns:
           - "*"
+        # Majors are deliberately excluded: they are the updates most likely to
+        # need a workflow change (input removals, runner or Node bumps), so they
+        # stay as their own PR instead of riding along inside a bundle of
+        # routine bumps that looks safe to merge.
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: pip
     directory: /
@@ -23,6 +30,12 @@ updates:
       python:
         patterns:
           - "*"
+        # Same reasoning as the actions group above: pytest/pylint majors have
+        # historically changed test discovery and default checks, so they are
+        # reviewed on their own rather than inside a routine bump bundle.
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: docker
     directory: /
