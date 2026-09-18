@@ -83,6 +83,8 @@ class TestTimeouts:
             method(1)
         elif method_name == 'get_episodes':
             method(1)
+        elif method_name == 'get_show':
+            method(1)
         elif method_name == 'update_show':
             method(1, {})
         elif method_name == 'update_episode':
@@ -155,6 +157,12 @@ class TestEndpoints:
         client.get_episodes(42)
         assert session.calls[0]['url'] == \
             f"{BASE_URL}/api/v3/episode?seriesId=42"
+
+    def test_show_endpoint_uses_series_id(self):
+        """A single show is fetched from /api/v3/series/{id}."""
+        client, session = _make_client({'get': FakeResponse({'id': 7})})
+        client.get_show(7)
+        assert session.calls[0]['url'] == f"{BASE_URL}/api/v3/series/7"
 
     def test_update_show_puts_to_series_id(self):
         """Show updates PUT to the series resource."""
@@ -301,6 +309,7 @@ class TestAuthenticationRejection:
     @pytest.mark.parametrize('status_code', [401, 403])
     @pytest.mark.parametrize('method_name,args', [
         ('get_shows', ()),
+        ('get_show', (1,)),
         ('get_tags', ()),
         ('get_episode_files', (1,)),
     ])
