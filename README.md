@@ -88,7 +88,7 @@ docker logs sonarr-tagger
 
 Example log output:
 ```
-2025-04-27 12:00:00 - INFO - Starting Sonarr Tag Updater v1.0.8
+2025-04-27 12:00:00 - INFO - Starting Sonarr Tag Updater v1.0.9
 2025-04-27 12:00:02 - INFO - Processing 125 shows
 2025-04-27 12:00:05 - DEBUG - Show: Breaking Bad - Score: 150 - Tag: positive-score
 2025-04-27 12:00:05 - DEBUG - Added 4k tag for Breaking Bad
