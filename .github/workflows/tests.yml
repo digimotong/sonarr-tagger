@@ -122,17 +122,42 @@ jobs:
         with:
           path: sonarr-tagger
 
+      # Prefer the matching branch on the sibling over its default branch. The
+      # twin change lands as its own PR, so the sibling's default branch would
+      # still hold the old code and this job would fail until that PR merged.
+      # github.head_ref is only set on pull_request runs, so a push to main
+      # falls back to the ref name (main) on both sides.
+      #
+      # The branch is probed before it is used, because it does not always exist
+      # on the sibling: Dependabot names its branches itself and per repository
+      # (`dependabot/pip/...`), so a weekly bump PR here has no counterpart
+      # there. Feeding that name straight to `ref` would fail the checkout, and
+      # once this job is a required status check that would make every
+      # dependency PR permanently unmergeable - including the action bumps that
+      # keep the SHA pins from going stale. An empty `ref` means "the target
+      # repository's default branch", which is the honest comparison for a
+      # change that is not a twin change.
+      - name: Resolve the sibling ref
+        id: sibling
+        run: |
+          branch="${{ github.head_ref || github.ref_name }}"
+          if git ls-remote --exit-code --heads \
+               https://github.com/digimotong/radarr-tagger \
+               "refs/heads/$branch" > /dev/null 2>&1; then
+            echo "ref=$branch" >> "$GITHUB_OUTPUT"
+            echo "sibling has '$branch'; comparing like for like"
+          else
+            echo "ref=" >> "$GITHUB_OUTPUT"
+            echo "::notice::sibling has no '$branch'; comparing against its default branch"
+          fi
+        shell: bash
+
       - name: Checkout the sibling repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: digimotong/radarr-tagger
           path: radarr-tagger
-          # Compare against the matching branch on the sibling, not its default
-          # branch. The twin change lands as its own PR, so the sibling's default
-          # branch would still hold the old code and this job would fail until
-          # that PR merged. github.head_ref is only set on pull_request runs, so
-          # a push to main falls back to the ref name (main) on both sides.
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ steps.sibling.outputs.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -148,7 +173,13 @@ jobs:
       # Only the parity file: the sibling's own suite runs in its own workflow,
       # and its coverage floor belongs there. The sibling repo is checked out
       # without its dependencies, so nothing else can be imported from it.
+      #
+      # PARITY_REQUIRE_SIBLING turns the module's "sibling not checked out" skip
+      # into a failure. Without it a botched sibling checkout would exit 0 having
+      # asserted nothing, and this job is meant to be a required status check.
       - name: Run the twin-divergence check
         run: |
           python -m pytest sonarr-tagger/tests/test_twin_parity.py -v
         shell: bash
+        env:
+          PARITY_REQUIRE_SIBLING: '1'

@@ -41,8 +41,25 @@ SIBLING_README_PATH = os.path.join(SIBLING_ROOT, 'README.md')
 # This module lives in the sonarr repo; the sibling only exists in a combined
 # checkout (the local /data/repos layout). Skip rather than fail when CI checks
 # out a single repository.
+#
+# In CI the sibling is always provisioned by the `parity` job, so a missing
+# sibling there means the checkout silently did not happen - and because pytest
+# exits 0 on a skip, that would report the job green while it asserted nothing.
+# A required status check that can pass without testing anything is worse than
+# no check at all, so enforce the sibling when CI asks for it (the parity job
+# sets PARITY_REQUIRE_SIBLING=1) and keep the quiet skip only for local runs.
+SIBLING_MISSING = not os.path.exists(SIBLING_PATH)
+REQUIRE_SIBLING = os.environ.get('PARITY_REQUIRE_SIBLING') == '1'
+
+if SIBLING_MISSING and REQUIRE_SIBLING:
+    raise RuntimeError(
+        f"PARITY_REQUIRE_SIBLING=1 but the sibling repository was not found at "
+        f"{SIBLING_ROOT}. The parity check cannot assert anything without it; "
+        "fix the sibling checkout in .github/workflows/tests.yml rather than "
+        "letting this job pass vacuously.")
+
 pytestmark = pytest.mark.skipif(
-    not os.path.exists(SIBLING_PATH),
+    SIBLING_MISSING,
     reason="sibling repository not checked out - parity check needs both repos")
 
 
