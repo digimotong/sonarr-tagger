@@ -19,7 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.12', '3.13']
+        # 3.14 is included because it is what the Dockerfile now pins: test the
+        # interpreter the shipped image actually runs. The `lint` job below stays
+        # on a single version on purpose - matrixing it would rename the required
+        # status check from `lint` to `lint (3.12)` and block every merge.
+        python-version: ['3.12', '3.13', '3.14']
 
     steps:
       - name: Checkout
