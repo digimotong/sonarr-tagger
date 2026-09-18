@@ -13,6 +13,12 @@ agree really does agree, by comparing normalised source text, while explicitly
 allowing the parts that are legitimately different (the product name and URL
 environment variables).
 
+It also compares the *documentation scaffolding* - the guard names in
+``tests/test_docs.py``, the notes in ``.env.example`` and the README headings -
+because that is where the drift actually happened: the sibling's env sample lost
+a timeout note and its doc-test file fell six guards behind this one, and a
+source-only comparison could not see either.
+
 If this fails, the fix is to port the change to the sibling - not to relax the
 assertion. The expected shape of each twin is pinned below so that a silent
 rewrite of one side is caught rather than rubber-stamped.
@@ -28,6 +34,9 @@ import main
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIBLING_ROOT = os.path.join(os.path.dirname(REPO_ROOT), 'radarr-tagger')
 SIBLING_PATH = os.path.join(SIBLING_ROOT, 'radarr-tagger', 'main.py')
+SIBLING_DOC_TESTS_PATH = os.path.join(SIBLING_ROOT, 'tests', 'test_docs.py')
+SIBLING_ENV_EXAMPLE_PATH = os.path.join(SIBLING_ROOT, '.env.example')
+SIBLING_README_PATH = os.path.join(SIBLING_ROOT, 'README.md')
 
 # This module lives in the sonarr repo; the sibling only exists in a combined
 # checkout (the local /data/repos layout). Skip rather than fail when CI checks
@@ -79,6 +88,22 @@ def _normalise(source):
     text = re.sub(r'#.*', '', text)              # drop comments
     text = re.sub(r'\s+', '', text)              # drop all whitespace
     return text
+
+
+def _normalise_comment(line):
+    """Normalise a documentation comment line for twin comparison.
+
+    ``_normalise`` is built for code: it drops comments and all whitespace, so
+    every comment line collapses to the empty string and comparing them would
+    always pass. This keeps the words, folds case and runs of spaces, and
+    substitutes the product names so only genuine differences remain.
+    """
+    text = line.lstrip('#').strip()
+    for product in ('Radarr', 'radarr', 'Sonarr', 'sonarr'):
+        text = text.replace(product, 'product')
+    text = re.sub(r'\b[Mm]ovies?\b', 'resource', text)
+    text = re.sub(r'\b[Ss]hows?\b', 'resource', text)
+    return re.sub(r'\s+', ' ', text).lower()
 
 
 def _extract(source, name):
@@ -173,3 +198,71 @@ class TestProductSpecificExpectations:
     def test_season_filter_optimisation_is_retained(self, own_source):
         """The season-0 filter is Sonarr-only; it must not be lost."""
         assert 'season_number=0' in own_source
+
+
+class TestDocumentationScaffoldingMatches:
+    """The docs and their guards are twins too, and must be kept in lockstep.
+
+    Comparing ``main.py`` alone missed real drift: one env sample carried a
+    timeout note the other had lost, and one ``test_docs.py`` was six guards
+    ahead of the other's. Structure is compared rather than prose (a heading, a
+    variable name, a test name), and nothing here asserts wording, so both
+    files stay free to be rewritten.
+    """
+
+    def _read(self, path):
+        """Return the text of a sibling file."""
+        with open(path, encoding='utf-8') as handle:
+            return handle.read()
+
+    def _guard_names(self, source):
+        """Return the test and class names defined in a test_docs.py file."""
+        return (
+            set(re.findall(r'^class (\w+)', source, re.MULTILINE)),
+            set(re.findall(r'^\s+def (test_\w+)', source, re.MULTILINE)),
+        )
+
+    def test_doc_guard_names_match(self):
+        """Both doc-test files enforce the same set of claims."""
+        own = self._guard_names(self._read(os.path.join(
+            REPO_ROOT, 'tests', 'test_docs.py')))
+        sibling = self._guard_names(self._read(SIBLING_DOC_TESTS_PATH))
+        assert own == sibling, (
+            "tests/test_docs.py and the sibling's no longer guard the same "
+            "claims. Port the missing guards rather than relaxing this check.\n"
+            f"classes only here: {sorted(own[0] - sibling[0])}, "
+            f"only there: {sorted(sibling[0] - own[0])}\n"
+            f"tests only here: {sorted(own[1] - sibling[1])}, "
+            f"only there: {sorted(sibling[1] - own[1])}")
+
+    def test_env_example_notes_match(self):
+        """The two sample env files explain the same things.
+
+        Comment lines only: the values themselves differ by product, which is
+        exactly why the product name is normalised away before comparing.
+        """
+        def notes(text):
+            return sorted(
+                _normalise_comment(line) for line in text.splitlines()
+                if line.startswith('#'))
+
+        own = notes(self._read(os.path.join(REPO_ROOT, '.env.example')))
+        sibling = notes(self._read(SIBLING_ENV_EXAMPLE_PATH))
+        missing_here = [line for line in sibling if line not in own]
+        missing_there = [line for line in own if line not in sibling]
+        assert own == sibling, (
+            "The .env.example files have diverged.\n"
+            f"missing here: {missing_here}\nmissing in the sibling: "
+            f"{missing_there}")
+
+    def test_readme_section_headings_match(self):
+        """Both READMEs are organised the same way."""
+        def headings(text):
+            return [_normalise_comment(line) for line in text.splitlines()
+                    if line.startswith('#')]
+
+        own = headings(self._read(os.path.join(REPO_ROOT, 'README.md')))
+        sibling = headings(self._read(SIBLING_README_PATH))
+        assert own == sibling, (
+            "The READMEs no longer have matching section headings.\n"
+            f"here: {own}\nthere: {sibling}")
