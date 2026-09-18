@@ -5,3 +5,12 @@
 pytest==9.1.1
 pytest-cov==7.1.0
 pylint==4.0.8
+
+# The workflow contract guards in tests/test_twin_parity.py parse
+# .github/workflows/tests.yml instead of matching its text: that file's own
+# comments name `paths:` and `branches:` while explaining why filters must not be
+# used, so a substring check cannot tell a real trigger filter from prose - and
+# no regex can see a job grow a `strategy:` block, which renames the required
+# status check. Parsing needs a YAML reader, so it is a declared dev dependency
+# rather than an implicit one that happens to be present locally.
+pyyaml==6.0.3

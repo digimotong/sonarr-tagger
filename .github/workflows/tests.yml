@@ -114,6 +114,14 @@ jobs:
   # the empty-API-key guard. tests/test_twin_parity.py compares the logic that
   # must stay identical, but it needs both checkouts to do so, which the plain
   # `test` job above cannot provide.
+  #
+  # `parity` is a required status check in both repositories, so its *name* is
+  # load-bearing: renaming the job (or matrixing it, which would rename it to
+  # `parity (3.12)`) leaves the required `parity` context reporting nothing, and
+  # an unreported required check blocks every merge instead of failing visibly.
+  # The bare `push:`/`pull_request:` triggers above are load-bearing in the same
+  # way - a `paths:`/`branches:` filter would skip the whole run on matching
+  # PRs, which is precisely when the required check has to report.
   parity:
     runs-on: ubuntu-latest
     steps:
