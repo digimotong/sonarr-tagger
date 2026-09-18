@@ -300,6 +300,44 @@ class TestMainPollLoop:
         assert any('Retrying in 5 minutes' in message
                    for message in collector.messages)
 
+    def test_authentication_error_is_fatal_and_not_retried(self, monkeypatch):
+        """A rejected API key exits 1 instead of retrying forever.
+
+        Retrying cannot repair a wrong key. Before this, the loop logged one line
+        every five minutes indefinitely while tagging nothing - three processes
+        with an empty key did exactly that for a day, and the only symptom was
+        unrelated 401 noise in the Radarr log. The container must die so its
+        restart policy shows the failure.
+        """
+        self._prepare(monkeypatch)
+        sleeps = []
+
+        def reject(api, config, test_mode=False):
+            raise main.AuthenticationError('Sonarr rejected the API key (HTTP 401)')
+
+        def record_sleep(seconds):
+            sleeps.append(seconds)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(main.time, 'sleep', record_sleep)
+        monkeypatch.setattr(main, 'run_once', reject)
+        with _RecordCollector() as collector:
+            with pytest.raises(SystemExit) as excinfo:
+                main.main()
+
+        assert excinfo.value.code == 1
+        assert sleeps == [], 'a rejected key must not be retried after 5 minutes'
+        assert any('Authentication failed' in message
+                   for message in collector.messages)
+
+    def test_authentication_error_is_a_request_exception(self):
+        """AuthenticationError stays catchable as a RequestException.
+
+        Every call site already catches RequestException, so subclassing it keeps
+        all existing failure handling intact while main() singles this case out.
+        """
+        assert issubclass(main.AuthenticationError, main.RequestException)
+
     def test_test_mode_flag_forwarded(self, monkeypatch):
         """--test is passed through to run_once."""
         self._prepare(monkeypatch)

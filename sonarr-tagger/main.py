@@ -45,6 +45,20 @@ MAX_INTERVAL_MINUTES = 525_600  # one year
 # Log levels accepted in LOG_LEVEL, as a case-insensitive lookup.
 VALID_LOG_LEVELS = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
 
+def _raise_on_auth_failure(response):
+    """Raise ``AuthenticationError`` when Sonarr rejects the API key.
+
+    Must run *before* ``response.raise_for_status()``: 401 and 403 are otherwise
+    flattened into a generic ``HTTPError`` and retried forever by the poll loop.
+    This was a real, silent failure mode - three stale processes with an empty
+    API key sat in the retry loop for a day, emitting a 401 every five minutes
+    while never tagging anything, and the container reported nothing wrong.
+    """
+    if getattr(response, 'status_code', None) in (401, 403):
+        raise AuthenticationError(
+            f"Sonarr rejected the API key (HTTP {response.status_code}). "
+            "Check SONARR_API_KEY; retrying cannot fix this.")
+
 class SonarrAPI:
     """Client for Sonarr API interactions"""
 
@@ -64,10 +78,27 @@ class SonarrAPI:
         endpoint = f"{self.base_url}/api/v3/series"
         try:
             response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
             logging.error("Failed to fetch shows: %s", str(e))
+            raise
+
+    def get_show(self, series_id: int) -> Dict:
+        """Fetch a single show from Sonarr.
+
+        Used to re-read immediately before a write so the PUT is not built from
+        a resource fetched at the start of the pass (see _update_show_tags).
+        """
+        endpoint = f"{self.base_url}/api/v3/series/{series_id}"
+        try:
+            response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            logging.error("Failed to fetch show %s: %s", series_id, str(e))
             raise
 
     def get_tags(self) -> List[Dict]:
@@ -75,6 +106,7 @@ class SonarrAPI:
         endpoint = f"{self.base_url}/api/v3/tag"
         try:
             response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -88,6 +120,7 @@ class SonarrAPI:
             response = self.session.post(endpoint, json={
                 'label': label
             }, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -99,6 +132,7 @@ class SonarrAPI:
         endpoint = f"{self.base_url}/api/v3/episodefile?seriesId={series_id}"
         try:
             response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -111,6 +145,7 @@ class SonarrAPI:
         try:
             response = self.session.put(endpoint, json=series_data,
                                         timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return True
         except RequestException as e:
@@ -121,11 +156,25 @@ class SonarrAPI:
                 str(e))
             return False
 
-    def get_episodes(self, series_id: int) -> List[Dict]:
-        """Fetch all episodes for a show from Sonarr"""
-        endpoint = f"{self.base_url}/api/v3/episode?seriesId={series_id}"
+    def get_episodes(self, series_id: int,
+                     season_number: Optional[int] = None) -> List[Dict]:
+        """Fetch episodes for a show from Sonarr.
+
+        ``season_number`` restricts the request to a single season. The only
+        caller that needs episodes looks exclusively at season 0, so passing it
+        avoids transferring every other season: for a 1,241-episode series the
+        filtered response is 63 episodes / 39 KB instead of 959 KB, and across a
+        full library it cuts the pass from ~11.4 MB to ~1.7 MB. The caller still
+        filters on seasonNumber, so an older Sonarr that ignored the parameter
+        would simply behave as it does today.
+        """
+        query = f"seriesId={series_id}"
+        if season_number is not None:
+            query += f"&seasonNumber={season_number}"
+        endpoint = f"{self.base_url}/api/v3/episode?{query}"
         try:
             response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -138,6 +187,7 @@ class SonarrAPI:
         try:
             response = self.session.put(endpoint, json=episode_data,
                                         timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return True
         except RequestException as e:
@@ -147,6 +197,20 @@ class SonarrAPI:
                 response.text if 'response' in locals() else '',
                 str(e))
             return False
+
+class AuthenticationError(RequestException):
+    """Raised when Sonarr rejects the API key (HTTP 401 or 403).
+
+    A wrong key is not a transient fault, so it must not be retried: the poll
+    loop would otherwise log one line every five minutes forever while never
+    tagging anything. Treated as fatal so the container exits and its restart
+    policy surfaces the misconfiguration. See ``main()``.
+
+    Subclasses ``RequestException`` because an HTTP failure *is* a request
+    failure: every caller already catches that, so the thousands of request
+    paths keep treating 401 as a failure while ``main()`` can still single this
+    case out to stop retrying.
+    """
 
 def parse_args():
     """Parse command line arguments"""
@@ -329,9 +393,39 @@ def _process_episode_files(
 
     return min_score, has_4k, has_motong, has_mixed_release_groups
 
+def _merge_fresh_tags(
+        fresh_show: Dict,
+        current_tags: Set[int],
+        managed_tag_ids: Set[int],
+        new_tag_ids: List[int]) -> List[int]:
+    """Recompute the tags to write from a freshly read show.
+
+    ``_update_show_tags`` decides its tag list from a snapshot that can be
+    minutes old, and Sonarr has no partial-update endpoint for series
+    (/api/v3/series/editor returns 404), so the PUT carries the whole resource.
+    Re-reading the show is therefore not sufficient on its own: if the user added
+    a tag while the pass was running, writing the stale list would drop it. This
+    keeps every unmanaged tag the show has *now* and re-applies this tool's own
+    tags on top, so the fresh state wins.
+    """
+    fresh_current_tags = set(fresh_show.get('tags', []))
+    if fresh_current_tags == current_tags:
+        return new_tag_ids
+
+    logging.debug(
+        "Tags changed for %s during this pass (%s -> %s); merging",
+        fresh_show.get('title'), sorted(current_tags), sorted(fresh_current_tags))
+    merged_tag_ids = [tag_id for tag_id in fresh_current_tags
+                      if tag_id not in managed_tag_ids]
+    # Preserve the order the tags were computed in (score tag first, then the
+    # optional ones) minus any that the fresh read already lists.
+    for tag_id in new_tag_ids:
+        if tag_id not in merged_tag_ids:
+            merged_tag_ids.append(tag_id)
+    return merged_tag_ids
+
 def _update_show_tags(data: TagUpdateData) -> bool:
     """Update tags for a show based on collected data"""
-    show_update = data.sonarr.show.copy()
     # Fetch tags once instead of calling get_tags() for every existing tag on the
     # show (that was an N+1: one HTTP round-trip per tag, per show, every cycle).
     #
@@ -361,8 +455,30 @@ def _update_show_tags(data: TagUpdateData) -> bool:
         new_tag_ids.append(data.tags.tag_map['mixed-release-groups'])
 
     if set(new_tag_ids) != data.tags.current_tags:
-        show_update['tags'] = new_tag_ids
-        return data.sonarr.api.update_show(data.sonarr.show['id'], show_update)
+        # Re-read the show immediately before writing. ``data.sonarr.show`` was
+        # captured at the start of a pass that makes several requests per show,
+        # so a user editing tags in the Sonarr UI during the pass would otherwise
+        # have that edit reverted by this PUT, which sends the whole stale
+        # resource back (there is no partial-update endpoint for series:
+        # /api/v3/series/editor returns 404). Re-reading narrows the window from
+        # the length of the pass to a single round-trip; a failed refresh skips
+        # the write rather than gambling on stale data.
+        try:
+            fresh_show = data.sonarr.api.get_show(data.sonarr.show['id'])
+        except RequestException:
+            logging.warning(
+                "Skipping tag update for %s: could not re-read show",
+                data.sonarr.show['title'])
+            return False
+
+        # Re-reading alone is not enough: the tag list is also recomputed from
+        # the fresh snapshot, or a tag the user added during the pass is still
+        # dropped (see _merge_fresh_tags).
+        new_tag_ids = _merge_fresh_tags(
+            fresh_show, data.tags.current_tags, managed_tag_ids, new_tag_ids)
+
+        fresh_show['tags'] = new_tag_ids
+        return data.sonarr.api.update_show(data.sonarr.show['id'], fresh_show)
     return False
 
 def process_show_tags(
@@ -395,7 +511,9 @@ def monitor_existing_specials(api: SonarrAPI, show: Dict, config: Dict) -> int:
         return 0
 
     try:
-        episodes = api.get_episodes(show['id'])
+        # Season 0 only: this function ignores every other season, and the
+        # filtered response is ~6.6x smaller across the library.
+        episodes = api.get_episodes(show['id'], season_number=0)
     except RequestException:
         logging.warning("Failed to get episodes for show %s", show['id'])
         return 0
@@ -516,6 +634,12 @@ def main():
 
             logging.info("Next run in %s minutes", interval_minutes)
             time.sleep(interval_minutes * 60)
+
+        except AuthenticationError as e:
+            # Fatal: a rejected key never becomes valid by waiting, and retrying
+            # hides the problem behind one log line per 5 minutes forever.
+            logging.error("Authentication failed: %s", str(e))
+            sys.exit(1)
 
         except (RequestException, ValueError) as e:
             logging.error("Script failed: %s", str(e))

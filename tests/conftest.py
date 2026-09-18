@@ -112,6 +112,7 @@ class FakeSonarrAPI:
         self.created_tags = []
         self.calls = {
             'get_shows': 0,
+            'get_show': 0,
             'get_tags': 0,
             'create_tag': 0,
             'get_episode_files': 0,
@@ -132,6 +133,21 @@ class FakeSonarrAPI:
         self.calls['get_shows'] += 1
         self._maybe_fail('get_shows')
         return self.shows
+
+    def get_show(self, series_id):
+        """Return a *copy* of one configured show.
+
+        The copy matters: production code re-reads the show immediately before
+        PUT so that it writes fresh server state rather than the stale snapshot
+        captured at the start of the pass. Returning the same object here would
+        let a stale-snapshot bug pass unnoticed.
+        """
+        self.calls['get_show'] += 1
+        self._maybe_fail('get_show')
+        for show in self.shows:
+            if show['id'] == series_id:
+                return dict(show)
+        raise AssertionError(f"unexpected seriesId {series_id}")
 
     def get_tags(self):
         """Return the configured tag list."""
@@ -157,13 +173,21 @@ class FakeSonarrAPI:
             raise AssertionError(f"unexpected seriesId {series_id}")
         return self.episode_files[series_id]
 
-    def get_episodes(self, series_id):
-        """Return the configured episode list for a series."""
+    def get_episodes(self, series_id, season_number=None):
+        """Return the configured episode list for a series.
+
+        ``season_number`` mirrors the real client's filter. The fake applies it
+        (returning only matching episodes) so a test can prove the caller passes
+        season 0 rather than merely that the parameter exists.
+        """
         self.calls['get_episodes'] += 1
         self._maybe_fail('get_episodes')
         if series_id not in self.episodes:
             raise AssertionError(f"unexpected seriesId {series_id}")
-        return self.episodes[series_id]
+        episodes = self.episodes[series_id]
+        if season_number is None:
+            return episodes
+        return [e for e in episodes if e.get('seasonNumber') == season_number]
 
     def update_show(self, series_id, series_data):
         """Record an update and return the configured result."""

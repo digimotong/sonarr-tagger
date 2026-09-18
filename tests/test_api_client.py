@@ -18,6 +18,7 @@ API_KEY = 'test-key'
 # (method name on the client, HTTP verb it must issue, kwargs identifying the call)
 ENDPOINT_CASES = [
     ('get_shows', 'get'),
+    ('get_show', 'get'),
     ('get_tags', 'get'),
     ('get_episode_files', 'get'),
     ('get_episodes', 'get'),
@@ -82,6 +83,8 @@ class TestTimeouts:
         if method_name == 'get_episode_files':
             method(1)
         elif method_name == 'get_episodes':
+            method(1)
+        elif method_name == 'get_show':
             method(1)
         elif method_name == 'update_show':
             method(1, {})
@@ -155,6 +158,29 @@ class TestEndpoints:
         client.get_episodes(42)
         assert session.calls[0]['url'] == \
             f"{BASE_URL}/api/v3/episode?seriesId=42"
+
+    def test_episodes_season_filter_is_appended(self):
+        """A season filter narrows the request to one season.
+
+        The specials pass only inspects season 0, so asking for the whole series
+        transferred ~6.6x more data than needed.
+        """
+        client, session = _make_client({'get': FakeResponse([])})
+        client.get_episodes(42, season_number=0)
+        assert session.calls[0]['url'] == \
+            f"{BASE_URL}/api/v3/episode?seriesId=42&seasonNumber=0"
+
+    def test_episodes_without_season_filter_omits_the_parameter(self):
+        """Omitting the season keeps the original single-parameter URL."""
+        client, session = _make_client({'get': FakeResponse([])})
+        client.get_episodes(42, season_number=None)
+        assert 'seasonNumber' not in session.calls[0]['url']
+
+    def test_show_endpoint_uses_series_id(self):
+        """A single show is fetched from /api/v3/series/{id}."""
+        client, session = _make_client({'get': FakeResponse({'id': 7})})
+        client.get_show(7)
+        assert session.calls[0]['url'] == f"{BASE_URL}/api/v3/series/7"
 
     def test_update_show_puts_to_series_id(self):
         """Show updates PUT to the series resource."""
@@ -288,3 +314,56 @@ class TestErrorPaths:
         with pytest.raises(RequestException):
             client.create_tag('motong')
         assert "Failed to create tag 'motong'" in caplog.text
+
+class TestAuthenticationRejection:
+    """401/403 become AuthenticationError so the loop can stop retrying.
+
+    Retrying a rejected key can never succeed. Before this the generic
+    HTTPError was swallowed by the retry branch and the process logged one line
+    every five minutes forever - the exact silent failure seen in production,
+    where three stale processes with an empty key emitted 401s for a day.
+    """
+
+    @pytest.mark.parametrize('status_code', [401, 403])
+    @pytest.mark.parametrize('method_name,args', [
+        ('get_shows', ()),
+        ('get_show', (1,)),
+        ('get_tags', ()),
+        ('get_episode_files', (1,)),
+        ('get_episodes', (1,)),
+    ])
+    def test_get_rejections_raise_authentication_error(self, status_code,
+                                                       method_name, args):
+        """Every GET surfaces an auth rejection as AuthenticationError."""
+        client, _ = _make_client(
+            {'get': FakeResponse({}, status_code=status_code)})
+        with pytest.raises(main.AuthenticationError):
+            getattr(client, method_name)(*args)
+
+    @pytest.mark.parametrize('status_code', [401, 403])
+    def test_update_show_rejection_is_logged_and_returns_false(self, status_code,
+                                                              caplog):
+        """A PUT rejection does not raise: update_show reports failure.
+
+        The existing contract is a boolean, and _update_show_tags relies on it.
+        AuthenticationError still subclasses RequestException, so it is caught
+        by the same handler.
+        """
+        client, _ = _make_client(
+            {'put': FakeResponse({}, status_code=status_code)})
+        assert client.update_show(1, {}) is False
+        assert 'Failed to update show 1' in caplog.text
+
+    def test_create_tag_auth_rejection_propagates(self):
+        """A tag-creation rejection reaches the loop as AuthenticationError."""
+        client, _ = _make_client(
+            {'post': FakeResponse({}, status_code=401)})
+        with pytest.raises(main.AuthenticationError):
+            client.create_tag('motong')
+
+    def test_authentication_error_is_not_raised_for_other_4xx(self):
+        """A plain 404 stays a generic HTTPError, not an auth failure."""
+        client, _ = _make_client({'get': FakeResponse([], status_code=404)})
+        with pytest.raises(HTTPError) as excinfo:
+            client.get_shows()
+        assert not isinstance(excinfo.value, main.AuthenticationError)
