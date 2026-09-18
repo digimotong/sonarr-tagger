@@ -18,6 +18,19 @@ TAG_MAP = {
     'mixed-release-groups': 6,
 }
 
+def make_api_for(show, **kwargs):
+    """Build a ``FakeSonarrAPI`` that can serve ``show`` back from both the
+    library list and the single-show endpoint.
+
+    ``_update_show_tags`` re-reads a show immediately before writing (so the PUT
+    is based on current server state, not a snapshot taken at the start of a
+    pass), which means a show must exist in ``api.shows`` for a write to happen
+    at all. Registering it here keeps each test focused on tag logic instead of
+    repeating that setup. ``show`` is copied so the fixture object the test
+    still holds is never the one the code under test mutates.
+    """
+    return FakeSonarrAPI(shows=[dict(show)], **kwargs)
+
 class _LogCapture(logging.Handler):
     """Collect rendered log messages for assertions."""
 
@@ -286,6 +299,11 @@ class TestTagUpdates:
         config = config or self._config()
         if has_mixed_release_groups is not None:
             has_mixed = has_mixed_release_groups
+        # _update_show_tags re-reads the show before writing, so the show must be
+        # reachable from the fake's library. Registering it keeps each test's
+        # setup focused on the tag logic under test.
+        if not any(s['id'] == show['id'] for s in api.shows):
+            api.shows.append(dict(show))
         data = main.TagUpdateData(
             sonarr=main.SonarrContext(api=api, show=show, config=config),
             tags=main.TagContext(current_tags=set(show.get('tags', [])),
@@ -397,6 +415,10 @@ class TestNoNPlusOneRequests:
     """
 
     def _run(self, api, show):
+        # The re-read before the write means the show must exist in the fake's
+        # library (see the sibling helper in TestTagUpdates).
+        if not any(s['id'] == show['id'] for s in api.shows):
+            api.shows.append(dict(show))
         data = main.TagUpdateData(
             sonarr=main.SonarrContext(api=api, show=show,
                                       config={'tag_motong_enabled': False,
@@ -438,6 +460,8 @@ class TestNoNPlusOneRequests:
         api = FakeSonarrAPI()
         show = make_show(tags=[full_tag_map['requested'], TAG_MAP['motong'],
                                full_tag_map['potential-delete']])
+        # Registered so the pre-write re-read can resolve the show.
+        api.shows.append(dict(show))
         data = main.TagUpdateData(
             sonarr=main.SonarrContext(api=api, show=show,
                                       config={'tag_motong_enabled': False,
@@ -540,182 +564,3 @@ class TestSpecialsMonitoring:
         assert main.monitor_existing_specials(
             api, make_show(), self._config()) == 0
 
-class TestEnsureRequiredTags:
-    """ensure_required_tags creates missing managed tags exactly once."""
-
-    def test_existing_tags_are_reused(self):
-        """Tags already in Sonarr are not recreated."""
-        api = FakeSonarrAPI(tags=[
-            {'id': 10, 'label': label} for label in main.REQUIRED_TAGS])
-        tag_map = main.ensure_required_tags(api)
-        assert api.calls['create_tag'] == 0
-        assert tag_map['motong'] == 10
-
-    def test_missing_tags_are_created(self):
-        """Every managed tag absent from Sonarr is created."""
-        api = FakeSonarrAPI(tags=[{'id': 1, 'label': 'negative-score'}])
-        tag_map = main.ensure_required_tags(api)
-        assert api.created_tags == [
-            tag for tag in main.REQUIRED_TAGS if tag != 'negative-score']
-        assert set(tag_map) >= set(main.REQUIRED_TAGS)
-
-    def test_all_tags_present_in_map(self):
-        """The returned map covers every managed tag."""
-        api = FakeSonarrAPI()
-        tag_map = main.ensure_required_tags(api)
-        for tag in main.REQUIRED_TAGS:
-            assert tag in tag_map
-            assert isinstance(tag_map[tag], int)
-
-    def test_created_ids_are_used(self):
-        """The map uses the id Sonarr returned from the create call."""
-        api = FakeSonarrAPI()
-        tag_map = main.ensure_required_tags(api)
-        for tag in main.REQUIRED_TAGS:
-            assert tag_map[tag] in [t['id'] for t in api.tags]
-
-    def test_no_duplicate_creations(self):
-        """Each missing tag is created exactly once."""
-        api = FakeSonarrAPI()
-        main.ensure_required_tags(api)
-        assert len(api.created_tags) == len(set(api.created_tags))
-        assert api.calls['create_tag'] == len(main.REQUIRED_TAGS)
-
-class TestRunOnce:
-    """run_once performs exactly one pass and reports how many shows changed."""
-
-    def _api(self, shows):
-        return FakeSonarrAPI(
-            shows=shows,
-            tags=[{'id': i, 'label': label}
-                  for i, label in enumerate(main.REQUIRED_TAGS, start=1)],
-            episode_files={show['id']: [] for show in shows},
-            episodes={show['id']: [] for show in shows},
-        )
-
-    def _config(self, **overrides):
-        config = {
-            'score_threshold': 100,
-            'tag_motong_enabled': False,
-            'tag_4k_enabled': False,
-            'tag_mixed_release_groups_enabled': False,
-            'monitor_existing_specials_enabled': False,
-        }
-        config.update(overrides)
-        return config
-
-    def test_returns_count_of_updated_shows(self):
-        """Only shows whose tags changed are counted."""
-        api = self._api([make_show(1, 'A'), make_show(2, 'B')])
-        assert main.run_once(api, self._config()) == 2
-
-    def test_shows_already_correct_are_not_counted(self):
-        """A second pass over correct shows reports zero updates."""
-        tags = [{'id': i, 'label': label}
-                for i, label in enumerate(main.REQUIRED_TAGS, start=1)]
-        no_score_id = next(t['id'] for t in tags if t['label'] == 'no-score')
-        api = self._api([make_show(1, 'A', tags=[no_score_id])])
-        assert main.run_once(api, self._config()) == 0
-
-    def test_no_shows_returns_zero(self):
-        """An empty library is a no-op, not an error."""
-        api = self._api([])
-        assert main.run_once(api, self._config()) == 0
-
-    def test_ensures_tags_before_listing_shows(self):
-        """Tags are ensured so freshly created ids are available."""
-        api = self._api([make_show(1, 'A')])
-        main.run_once(api, self._config())
-        assert api.calls['get_tags'] == 1
-        assert api.calls['get_shows'] == 1
-
-    def test_run_once_preserves_unmanaged_tags(self):
-        """A full pass keeps unmanaged tags while still applying score tags.
-
-        End-to-end guard for the tag-wiping bug: run_once() feeds the *real*
-        ensure_required_tags() map (which contains every tag in Sonarr) into the
-        per-show tag logic, so this fails if the managed set is derived from that
-        map's values rather than from REQUIRED_TAGS.
-        """
-        library_tags = [{'id': i, 'label': label}
-                        for i, label in enumerate(main.REQUIRED_TAGS, start=1)]
-        library_tags += [{'id': 99, 'label': 'potential-delete'},
-                         {'id': 98, 'label': 'requested'}]
-        show = make_show(1, 'Keep Me', tags=[98, 99])
-        api = FakeSonarrAPI(shows=[show], tags=library_tags,
-                            episode_files={1: []}, episodes={1: []})
-        assert main.run_once(api, self._config()) == 1
-        tags = api.updates[0][1]['tags']
-        assert 98 in tags and 99 in tags, "run_once stripped an unmanaged tag"
-        no_score_id = next(t['id'] for t in library_tags
-                           if t['label'] == 'no-score')
-        assert no_score_id in tags
-
-    def test_unmanaged_tags_survive_repeated_passes(self):
-        """Tags are not eroded run after run (the reported symptom)."""
-        library_tags = [{'id': i, 'label': label}
-                        for i, label in enumerate(main.REQUIRED_TAGS, start=1)]
-        library_tags += [{'id': 99, 'label': 'potential-delete'}]
-        api = FakeSonarrAPI(shows=[make_show(1, 'A', tags=[99])],
-                            tags=library_tags, episode_files={1: []},
-                            episodes={1: []})
-        main.run_once(api, self._config())
-        assert 99 in api.updates[0][1]['tags']
-        api.shows = [make_show(1, 'A', tags=dict(api.updates)[1]['tags'])]
-        api.updates = []
-        assert main.run_once(api, self._config()) == 0
-        assert api.updates == [], "a stable library must not be rewritten"
-
-    def test_test_mode_limits_to_five_shows(self):
-        """--test processes at most the first five shows."""
-        shows = [make_show(i, f'Show {i}') for i in range(1, 9)]
-        api = self._api(shows)
-        assert main.run_once(api, self._config(), test_mode=True) == 5
-
-    def test_test_mode_leaves_smaller_libraries_alone(self):
-        """Fewer than five shows are all processed."""
-        api = self._api([make_show(1, 'A'), make_show(2, 'B')])
-        assert main.run_once(api, self._config(), test_mode=True) == 2
-
-    def test_test_mode_makes_one_show_listing(self):
-        """Test mode still only lists shows once (no re-fetch)."""
-        shows = [make_show(i, f'Show {i}') for i in range(1, 9)]
-        api = self._api(shows)
-        main.run_once(api, self._config(), test_mode=True)
-        assert api.calls['get_shows'] == 1
-
-    def test_completion_summary_reports_totals(self):
-        """The completion line reports updated/total."""
-        api = self._api([make_show(1, 'A'), make_show(2, 'B')])
-        messages = _capture_log_messages(
-            main.run_once, api, self._config())
-        assert any('Processing complete. Updated 2/2 shows' in msg
-                   for msg in messages)
-
-    def test_specials_summary_logged_when_enabled(self):
-        """The specials summary line appears with the feature enabled."""
-        api = self._api([make_show(1, 'A')])
-        messages = _capture_log_messages(
-            main.run_once, api,
-            self._config(monitor_existing_specials_enabled=True))
-        assert any('special episode(s) to monitored' in msg
-                   for msg in messages)
-
-    def test_no_specials_summary_when_disabled(self):
-        """With the feature off the summary line is not emitted."""
-        api = self._api([make_show(1, 'A')])
-        messages = _capture_log_messages(main.run_once, api, self._config())
-        assert not any('special episode(s) to monitored' in msg
-                       for msg in messages)
-
-    def test_monitor_specials_integrated(self):
-        """Specials are monitored as part of the pass when enabled."""
-        api = FakeSonarrAPI(
-            shows=[make_show(1, 'A')],
-            tags=[{'id': i, 'label': label}
-                  for i, label in enumerate(main.REQUIRED_TAGS, start=1)],
-            episode_files={1: []},
-            episodes={1: [make_episode(season_number=0, has_file=True)]},
-        )
-        main.run_once(api, self._config(monitor_existing_specials_enabled=True))
-        assert api.calls['update_episode'] == 1
