@@ -283,3 +283,67 @@ class TestDocumentationScaffoldingMatches:
         assert own == sibling, (
             "The READMEs no longer have matching section headings.\n"
             f"here: {own}\nthere: {sibling}")
+
+
+class TestWorkflowKeepsTheParityCheckUsable:
+    """The workflow is what makes this file a *check* rather than a unit test.
+
+    ``parity`` is a required status check in both repositories, which turns
+    three harmless-looking details of ``.github/workflows/tests.yml`` into load
+    bearing invariants. None of them is visible to the tests above: they can all
+    break while ``pytest`` stays green locally, and the damage is a merge-gated
+    repository rather than a red build.
+
+    ``main.py`` gets normalised twin comparison; this file does not, so what is
+    asserted here is the structure the check depends on, not wording. If one of
+    these fails, fix the workflow - relaxing the assertion restores the trap.
+    """
+
+    def _workflow(self):
+        """Return this repository's tests workflow as text."""
+        with open(os.path.join(REPO_ROOT, '.github', 'workflows',
+                               'tests.yml'), encoding='utf-8') as handle:
+            return handle.read()
+
+    def test_parity_job_still_named_parity(self):
+        """The job's name is the required check's context.
+
+        Renaming it to ``twin-parity`` (or matrixing it, which yields
+        ``parity (3.12)``) leaves the required ``parity`` context reporting
+        nothing at all, and an unreported required check blocks every merge
+        instead of failing visibly.
+        """
+        assert re.search(r'^  parity:$', self._workflow(), re.MULTILINE), (
+            "the workflow no longer declares a job literally named `parity`. "
+            "That name is the required status check context in both repos; "
+            "renaming the job makes every PR unmergeable.")
+
+    def test_sibling_ref_is_probed_before_it_is_used(self):
+        """The sibling ref must be resolved by probing, never assumed.
+
+        Dependabot names its branches per repository, so a weekly bump PR here
+        has no counterpart on the sibling. The probe falls back to the
+        sibling's default branch in that case; feeding the unprobed branch
+        straight to `ref` would fail the sibling checkout instead.
+        """
+        workflow = self._workflow()
+        assert 'git ls-remote --exit-code --heads' in workflow, (
+            "the sibling ref is no longer probed before use. Restricted and "
+            "bot-created branches do not exist on the sibling, so an unprobed "
+            "ref breaks the checkout - and with `parity` required that blocks "
+            "every dependency PR permanently.")
+        assert 'steps.sibling.outputs.ref' in workflow, (
+            "the sibling checkout no longer consumes the probed ref output; "
+            "an empty ref (the fallback) means 'the default branch'.")
+
+    def test_missing_sibling_fails_instead_of_skipping(self):
+        """The vacuous-pass guard must survive.
+
+        pytest exits 0 on a skip, so a botched sibling checkout would report
+        this job green having asserted nothing - the worst possible outcome for
+        a required check.
+        """
+        assert "PARITY_REQUIRE_SIBLING: '1'" in self._workflow(), (
+            "the parity job no longer sets PARITY_REQUIRE_SIBLING=1, so a "
+            "missing sibling checkout would skip every test here and still "
+            "report success.")
