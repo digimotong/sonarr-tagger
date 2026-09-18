@@ -425,14 +425,42 @@ class TestNoNPlusOneRequests:
             "for a show with "
             f"{tag_count} tags - the N+1 is back")
 
-    def test_managed_set_is_derived_from_tag_map(self):
-        """The managed-tag set comes from the map, not a per-tag request."""
+    def test_managed_set_is_derived_from_required_tags(self, full_tag_map):
+        """The strip set comes from the managed tag names, not the whole map.
+
+        ``ensure_required_tags()`` returns every tag Sonarr knows about, so
+        deriving the managed ids from that map erased unrelated tags
+        ('requested', 'potential-delete', ...) from every show, every pass. The
+        unmanaged ids used here are present in ``full_tag_map`` on purpose - that
+        is the production shape, and it is what makes this test fail if the strip
+        set is derived from the map's values again.
+        """
         api = FakeSonarrAPI()
-        show = make_show(tags=[999, TAG_MAP['motong'], 888])
-        self._run(api, show)
+        show = make_show(tags=[full_tag_map['requested'], TAG_MAP['motong'],
+                               full_tag_map['potential-delete']])
+        data = main.TagUpdateData(
+            sonarr=main.SonarrContext(api=api, show=show,
+                                      config={'tag_motong_enabled': False,
+                                              'tag_4k_enabled': False,
+                                              'tag_mixed_release_groups_enabled':
+                                                  False,
+                                              'monitor_existing_specials_enabled':
+                                                  False}),
+            tags=main.TagContext(current_tags=set(show['tags']),
+                                 tag_map=dict(full_tag_map)),
+            scores=main.ScoreContext(min_score=0, score_threshold=100),
+            has_4k=False,
+            has_motong=False,
+            has_mixed_release_groups=False,
+        )
+        assert main._update_show_tags(data) is True
         assert api.calls['get_tags'] == 0
-        assert 999 in api.updates[0][1]['tags']
-        assert 888 in api.updates[0][1]['tags']
+        updated = api.updates[0][1]['tags']
+        assert full_tag_map['requested'] in updated, "unmanaged tag stripped"
+        assert full_tag_map['potential-delete'] in updated, (
+            "unmanaged tag stripped")
+        assert TAG_MAP['no-score'] in updated
+        assert TAG_MAP['motong'] not in updated
 
 class TestSpecialsMonitoring:
     """monitor_existing_specials monitors downloaded season-0 episodes."""
@@ -600,6 +628,43 @@ class TestRunOnce:
         main.run_once(api, self._config())
         assert api.calls['get_tags'] == 1
         assert api.calls['get_shows'] == 1
+
+    def test_run_once_preserves_unmanaged_tags(self):
+        """A full pass keeps unmanaged tags while still applying score tags.
+
+        End-to-end guard for the tag-wiping bug: run_once() feeds the *real*
+        ensure_required_tags() map (which contains every tag in Sonarr) into the
+        per-show tag logic, so this fails if the managed set is derived from that
+        map's values rather than from REQUIRED_TAGS.
+        """
+        library_tags = [{'id': i, 'label': label}
+                        for i, label in enumerate(main.REQUIRED_TAGS, start=1)]
+        library_tags += [{'id': 99, 'label': 'potential-delete'},
+                         {'id': 98, 'label': 'requested'}]
+        show = make_show(1, 'Keep Me', tags=[98, 99])
+        api = FakeSonarrAPI(shows=[show], tags=library_tags,
+                            episode_files={1: []}, episodes={1: []})
+        assert main.run_once(api, self._config()) == 1
+        tags = api.updates[0][1]['tags']
+        assert 98 in tags and 99 in tags, "run_once stripped an unmanaged tag"
+        no_score_id = next(t['id'] for t in library_tags
+                           if t['label'] == 'no-score')
+        assert no_score_id in tags
+
+    def test_unmanaged_tags_survive_repeated_passes(self):
+        """Tags are not eroded run after run (the reported symptom)."""
+        library_tags = [{'id': i, 'label': label}
+                        for i, label in enumerate(main.REQUIRED_TAGS, start=1)]
+        library_tags += [{'id': 99, 'label': 'potential-delete'}]
+        api = FakeSonarrAPI(shows=[make_show(1, 'A', tags=[99])],
+                            tags=library_tags, episode_files={1: []},
+                            episodes={1: []})
+        main.run_once(api, self._config())
+        assert 99 in api.updates[0][1]['tags']
+        api.shows = [make_show(1, 'A', tags=dict(api.updates)[1]['tags'])]
+        api.updates = []
+        assert main.run_once(api, self._config()) == 0
+        assert api.updates == [], "a stable library must not be rewritten"
 
     def test_test_mode_limits_to_five_shows(self):
         """--test processes at most the first five shows."""

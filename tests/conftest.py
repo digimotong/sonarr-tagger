@@ -218,6 +218,19 @@ def make_episode(episode_id=1, season_number=0, episode_number=1,
     return episode
 
 @pytest.fixture
+def full_tag_map():
+    """A label->id map shaped like ``ensure_required_tags()`` really returns.
+
+    ``ensure_required_tags()`` maps *every* tag that exists in Sonarr, not only
+    the managed ones, so a realistic map must contain unmanaged entries. Do not
+    "simplify" this back to DEFAULT_TAG_MAP: tests built on a managed-only map
+    cannot detect unmanaged tags being stripped (that gap is exactly how the
+    tag-wiping bug shipped).
+    """
+    return {**DEFAULT_TAG_MAP, 'requested': 98, 'potential-delete': 99,
+            'no-new-seasons': 97, 'custom-mkv': 96}
+
+@pytest.fixture
 def tag_map():
     """Return a default label->id mapping for the managed tags."""
     return dict(DEFAULT_TAG_MAP)

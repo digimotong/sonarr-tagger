@@ -248,7 +248,7 @@ def get_score_tag(score: int, threshold: int) -> str:
         return "positive-score"
     return "no-score"
 
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 
 @dataclass
 class SonarrContext:
@@ -334,9 +334,21 @@ def _update_show_tags(data: TagUpdateData) -> bool:
     show_update = data.sonarr.show.copy()
     # Fetch tags once instead of calling get_tags() for every existing tag on the
     # show (that was an N+1: one HTTP round-trip per tag, per show, every cycle).
-    managed_tag_ids = set(data.tags.tag_map.values())
+    #
+    # The strip set must be derived from REQUIRED_TAGS, never from every value in
+    # ``data.tags.tag_map``: ensure_required_tags() maps *all* tags that exist in
+    # Sonarr (not just the managed ones), so ``set(tag_map.values())`` treated
+    # unrelated tags - 'requested', 'potential-delete', 'no-new-seasons',
+    # 'custom-mkv', auto-tagging tags - as managed and erased them from every show
+    # on every pass. Only the tags this tool owns may be stripped.
+    managed_tag_ids = {data.tags.tag_map[label] for label in REQUIRED_TAGS
+                       if label in data.tags.tag_map}
     new_tag_ids = [tag_id for tag_id in data.tags.current_tags
                   if tag_id not in managed_tag_ids]
+    preserved_tag_ids = sorted(data.tags.current_tags - managed_tag_ids)
+    if preserved_tag_ids:
+        logging.debug("Keeping unmanaged tags %s for %s",
+                      preserved_tag_ids, data.sonarr.show['title'])
 
     new_tag_name = get_score_tag(data.scores.min_score, data.scores.score_threshold)
     new_tag_ids.append(data.tags.tag_map[new_tag_name])
@@ -425,7 +437,13 @@ def monitor_existing_specials(api: SonarrAPI, show: Dict, config: Dict) -> int:
     return updated_count
 
 def ensure_required_tags(api: SonarrAPI) -> Dict:
-    """Ensure required tags exist and return tag name to ID mapping"""
+    """Ensure required tags exist and return a label -> ID mapping.
+
+    NOTE: the returned map covers *every* tag known to Sonarr, including tags
+    this tool does not manage. Callers deciding which tags may be stripped must
+    filter on REQUIRED_TAGS - iterating over the whole map would treat unrelated
+    tags as managed.
+    """
     all_tags = api.get_tags()
     tag_map = {tag['label']: tag['id'] for tag in all_tags}
 
