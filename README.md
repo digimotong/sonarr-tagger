@@ -116,6 +116,11 @@ docker run --rm --env-file .env digimotong/sonarr-tagger:latest python main.py -
   fix the environment and recreate the container.
 - Every Sonarr request uses a 30 second timeout. A failed cycle is logged and
   retried after 5 minutes rather than stopping the container.
+- A rejected API key (`401`/`403`) is **not** retried: the container exits with
+  status `1` and an `Authentication failed: ...` line, so the restart policy
+  surfaces the bad key. Retrying can never fix a wrong key.
+- Tags are re-read immediately before every write, so tag edits made in the
+  Sonarr UI while a pass is running are not reverted.
 
 ## Development
 
@@ -128,6 +133,21 @@ python -m venv .venv
 .venv/bin/python -m pytest -q          # test suite
 .venv/bin/python -m pylint sonarr-tagger
 ```
+
+### Twin-divergence check
+
+This repository and `radarr-tagger` are near-duplicates that deploy
+independently, so a hardening fix applied to one can silently miss the other.
+`tests/test_twin_parity.py` compares the logic that must stay in lockstep and
+**skips** unless both repositories are checked out side by side:
+
+```bash
+# from a directory containing both checkouts
+python -m pytest sonarr-tagger/tests/test_twin_parity.py -v
+```
+
+When it fails, port the change to the sibling repository rather than relaxing
+the assertion. CI runs this in a dedicated `parity` job that checks out both.
 
 ## Requirements
 

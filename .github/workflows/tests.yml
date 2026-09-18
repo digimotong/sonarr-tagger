@@ -107,3 +107,48 @@ jobs:
           echo "$output"
           test "$status" = "1"
           echo "$output" | grep -q "Configuration error"
+
+  # sonarr-tagger and radarr-tagger are near-duplicates maintained as separate
+  # repositories, and each auto-deploys on its own. A hardening fix applied to
+  # one therefore misses the other - which is how this sibling ended up without
+  # the empty-API-key guard. tests/test_twin_parity.py compares the logic that
+  # must stay identical, but it needs both checkouts to do so, which the plain
+  # `test` job above cannot provide.
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: sonarr-tagger
+
+      - name: Checkout the sibling repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: digimotong/radarr-tagger
+          path: radarr-tagger
+          # Compare against the matching branch on the sibling, not its default
+          # branch. The twin change lands as its own PR, so the sibling's default
+          # branch would still hold the old code and this job would fail until
+          # that PR merged. github.head_ref is only set on pull_request runs, so
+          # a push to main falls back to the ref name (main) on both sides.
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sonarr-tagger/requirements-dev.txt
+        shell: bash
+
+      # Only the parity file: the sibling's own suite runs in its own workflow,
+      # and its coverage floor belongs there. The sibling repo is checked out
+      # without its dependencies, so nothing else can be imported from it.
+      - name: Run the twin-divergence check
+        run: |
+          python -m pytest sonarr-tagger/tests/test_twin_parity.py -v
+        shell: bash
