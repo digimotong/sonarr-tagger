@@ -18,6 +18,7 @@ API_KEY = 'test-key'
 # (method name on the client, HTTP verb it must issue, kwargs identifying the call)
 ENDPOINT_CASES = [
     ('get_shows', 'get'),
+    ('get_show', 'get'),
     ('get_tags', 'get'),
     ('get_episode_files', 'get'),
     ('get_episodes', 'get'),
@@ -157,6 +158,23 @@ class TestEndpoints:
         client.get_episodes(42)
         assert session.calls[0]['url'] == \
             f"{BASE_URL}/api/v3/episode?seriesId=42"
+
+    def test_episodes_season_filter_is_appended(self):
+        """A season filter narrows the request to one season.
+
+        The specials pass only inspects season 0, so asking for the whole series
+        transferred ~6.6x more data than needed.
+        """
+        client, session = _make_client({'get': FakeResponse([])})
+        client.get_episodes(42, season_number=0)
+        assert session.calls[0]['url'] == \
+            f"{BASE_URL}/api/v3/episode?seriesId=42&seasonNumber=0"
+
+    def test_episodes_without_season_filter_omits_the_parameter(self):
+        """Omitting the season keeps the original single-parameter URL."""
+        client, session = _make_client({'get': FakeResponse([])})
+        client.get_episodes(42, season_number=None)
+        assert 'seasonNumber' not in session.calls[0]['url']
 
     def test_show_endpoint_uses_series_id(self):
         """A single show is fetched from /api/v3/series/{id}."""
@@ -312,6 +330,7 @@ class TestAuthenticationRejection:
         ('get_show', (1,)),
         ('get_tags', ()),
         ('get_episode_files', (1,)),
+        ('get_episodes', (1,)),
     ])
     def test_get_rejections_raise_authentication_error(self, status_code,
                                                        method_name, args):

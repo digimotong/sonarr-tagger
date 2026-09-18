@@ -173,13 +173,21 @@ class FakeSonarrAPI:
             raise AssertionError(f"unexpected seriesId {series_id}")
         return self.episode_files[series_id]
 
-    def get_episodes(self, series_id):
-        """Return the configured episode list for a series."""
+    def get_episodes(self, series_id, season_number=None):
+        """Return the configured episode list for a series.
+
+        ``season_number`` mirrors the real client's filter. The fake applies it
+        (returning only matching episodes) so a test can prove the caller passes
+        season 0 rather than merely that the parameter exists.
+        """
         self.calls['get_episodes'] += 1
         self._maybe_fail('get_episodes')
         if series_id not in self.episodes:
             raise AssertionError(f"unexpected seriesId {series_id}")
-        return self.episodes[series_id]
+        episodes = self.episodes[series_id]
+        if season_number is None:
+            return episodes
+        return [e for e in episodes if e.get('seasonNumber') == season_number]
 
     def update_show(self, series_id, series_data):
         """Record an update and return the configured result."""

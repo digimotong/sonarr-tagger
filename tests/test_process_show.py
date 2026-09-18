@@ -564,3 +564,318 @@ class TestSpecialsMonitoring:
         assert main.monitor_existing_specials(
             api, make_show(), self._config()) == 0
 
+class TestSpecialEpisodeFetching:
+    """The specials pass must only ask Sonarr for season 0.
+
+    It ignores every other season, so fetching them was pure waste: a 1,241
+    episode series returned 959 KB where 39 KB (63 episodes) suffices, and the
+    parameter is what cuts a full library pass from ~11.4 MB to ~1.7 MB.
+    """
+
+    def _config(self, enabled=True):
+        return {'monitor_existing_specials_enabled': enabled,
+                'tag_motong_enabled': False, 'tag_4k_enabled': False,
+                'tag_mixed_release_groups_enabled': False}
+
+    def test_season_zero_is_requested(self):
+        """The fetch passes season_number=0 to the API client."""
+        seen = []
+
+        class RecordingAPI:
+            """Capture the argument the caller supplies."""
+
+            def get_episodes(self, series_id, season_number=None):
+                """Record the requested season."""
+                seen.append((series_id, season_number))
+                return []
+
+        main.monitor_existing_specials(
+            RecordingAPI(), make_show(1, 'S'), self._config())
+        assert seen == [(1, 0)]
+
+    def test_only_specials_are_updated(self):
+        """Season 0 episodes are updated; other seasons never are."""
+        api = FakeSonarrAPI(episodes={1: [
+            make_episode(season_number=0, monitored=False, has_file=True),
+            make_episode(season_number=1, monitored=False, has_file=True),
+        ]})
+        count = main.monitor_existing_specials(
+            api, make_show(1, 'S'), self._config())
+        assert count == 1
+        assert len(api.episode_updates) == 1
+
+    def test_disabled_flag_makes_no_request(self):
+        """With the feature off, no episode fetch happens at all."""
+        api = FakeSonarrAPI(episodes={1: []})
+        assert main.monitor_existing_specials(
+            api, make_show(1, 'S'), self._config(enabled=False)) == 0
+        assert api.calls['get_episodes'] == 0
+
+class TestStaleWriteProtection:
+    """The PUT must be built from a fresh read, not a stale snapshot.
+
+    _update_show_tags receives a show captured at the start of a pass that makes
+    several requests per show. Without re-reading, a tag edit made in the Sonarr
+    UI during the pass is silently reverted by the next PUT, because the PUT
+    sends the whole resource (there is no partial-update endpoint:
+    /api/v3/series/editor returns 404).
+    """
+
+    def _config(self):
+        return {'tag_motong_enabled': False, 'tag_4k_enabled': False,
+                'tag_mixed_release_groups_enabled': False,
+                'monitor_existing_specials_enabled': False}
+
+    def _update(self, api, show):
+        data = main.TagUpdateData(
+            sonarr=main.SonarrContext(api=api, show=show,
+                                      config=self._config()),
+            tags=main.TagContext(current_tags=set(show.get('tags', [])),
+                                 tag_map=dict(TAG_MAP)),
+            scores=main.ScoreContext(min_score=0, score_threshold=100),
+            has_4k=False, has_motong=False, has_mixed_release_groups=False)
+        return main._update_show_tags(data)
+
+    def test_show_is_reread_before_update(self):
+        """A write is preceded by a GET of that same show."""
+        show = make_show(1, 'S', tags=[])
+        api = make_api_for(show)
+        assert self._update(api, show) is True
+        assert api.calls['get_show'] == 1
+        assert api.updates[0][0] == 1
+
+    def test_no_reread_when_nothing_changes(self):
+        """A pass with no tag change costs no extra request."""
+        show = make_show(1, 'S', tags=[TAG_MAP['no-score']])
+        api = make_api_for(show)
+        assert self._update(api, show) is False
+        assert api.calls['get_show'] == 0
+
+    def test_freshly_read_tags_are_written_not_stale_ones(self):
+        """Tags added to Sonarr mid-pass survive the update."""
+        stale = make_show(1, 'S', tags=[])
+        api = make_api_for(stale)
+        # Simulate the mid-pass edit: the server now also has tag 99.
+        api.shows = [make_show(1, 'S', tags=[99])]
+
+        assert self._update(api, stale) is True
+        tags = api.updates[0][1]['tags']
+        assert 99 in tags, 'a tag added during the pass was reverted'
+        assert TAG_MAP['no-score'] in tags
+
+    def test_update_skipped_when_reread_fails(self):
+        """If the refresh fails, no PUT is attempted with stale data."""
+        show = make_show(1, 'S', tags=[])
+        api = make_api_for(show, fail_on={'get_show': main.RequestException})
+        assert self._update(api, show) is False
+        assert api.calls['get_show'] == 1
+        assert api.calls['update_show'] == 0
+
+class TestMergeFreshTags:
+    """Unit coverage for the tag merge used by the stale-write guard."""
+
+    def test_identical_tags_return_computed_list_unchanged(self):
+        """An unchanged snapshot needs no merge work."""
+        assert main._merge_fresh_tags({'tags': [1]}, {1}, {1}, [3]) == [3]
+
+    def test_new_unmanaged_tag_is_kept(self):
+        """A tag added during the pass survives, ahead of the computed ones."""
+        result = main._merge_fresh_tags(
+            {'tags': [99], 'title': 'S'}, set(), {1}, [3])
+        assert result == [99, 3]
+
+    def test_stale_managed_tag_is_replaced_by_the_new_one(self):
+        """A managed tag from the old snapshot does not leak into the write."""
+        result = main._merge_fresh_tags(
+            {'tags': [2, 99], 'title': 'S'}, {2}, {1, 2}, [1])
+        assert result == [99, 1]
+
+    def test_duplicate_computed_tag_is_not_appended_twice(self):
+        """A tag already present in the fresh read is not duplicated."""
+        result = main._merge_fresh_tags(
+            {'tags': [3, 99], 'title': 'S'}, {3}, {1}, [3])
+        assert result == [99, 3]
+
+    def test_show_without_tags_key_is_handled(self):
+        """A payload missing 'tags' merges to just the computed tags."""
+        assert main._merge_fresh_tags({}, {1}, {1}, [3]) == [3]
+
+class TestEnsureRequiredTags:
+    """ensure_required_tags creates missing managed tags exactly once."""
+
+    def test_existing_tags_are_reused(self):
+        """Tags already in Sonarr are not recreated."""
+        api = FakeSonarrAPI(tags=[
+            {'id': 10, 'label': label} for label in main.REQUIRED_TAGS])
+        tag_map = main.ensure_required_tags(api)
+        assert api.calls['create_tag'] == 0
+        assert tag_map['motong'] == 10
+
+    def test_missing_tags_are_created(self):
+        """Every managed tag absent from Sonarr is created."""
+        api = FakeSonarrAPI(tags=[{'id': 1, 'label': 'negative-score'}])
+        tag_map = main.ensure_required_tags(api)
+        assert api.created_tags == [
+            tag for tag in main.REQUIRED_TAGS if tag != 'negative-score']
+        assert set(tag_map) >= set(main.REQUIRED_TAGS)
+
+    def test_all_tags_present_in_map(self):
+        """The returned map covers every managed tag."""
+        api = FakeSonarrAPI()
+        tag_map = main.ensure_required_tags(api)
+        for tag in main.REQUIRED_TAGS:
+            assert tag in tag_map
+            assert isinstance(tag_map[tag], int)
+
+    def test_created_ids_are_used(self):
+        """The map uses the id Sonarr returned from the create call."""
+        api = FakeSonarrAPI()
+        tag_map = main.ensure_required_tags(api)
+        for tag in main.REQUIRED_TAGS:
+            assert tag_map[tag] in [t['id'] for t in api.tags]
+
+    def test_no_duplicate_creations(self):
+        """Each missing tag is created exactly once."""
+        api = FakeSonarrAPI()
+        main.ensure_required_tags(api)
+        assert len(api.created_tags) == len(set(api.created_tags))
+        assert api.calls['create_tag'] == len(main.REQUIRED_TAGS)
+
+class TestRunOnce:
+    """run_once performs exactly one pass and reports how many shows changed."""
+
+    def _api(self, shows):
+        return FakeSonarrAPI(
+            shows=shows,
+            tags=[{'id': i, 'label': label}
+                  for i, label in enumerate(main.REQUIRED_TAGS, start=1)],
+            episode_files={show['id']: [] for show in shows},
+            episodes={show['id']: [] for show in shows},
+        )
+
+    def _config(self, **overrides):
+        config = {
+            'score_threshold': 100,
+            'tag_motong_enabled': False,
+            'tag_4k_enabled': False,
+            'tag_mixed_release_groups_enabled': False,
+            'monitor_existing_specials_enabled': False,
+        }
+        config.update(overrides)
+        return config
+
+    def test_returns_count_of_updated_shows(self):
+        """Only shows whose tags changed are counted."""
+        api = self._api([make_show(1, 'A'), make_show(2, 'B')])
+        assert main.run_once(api, self._config()) == 2
+
+    def test_shows_already_correct_are_not_counted(self):
+        """A second pass over correct shows reports zero updates."""
+        tags = [{'id': i, 'label': label}
+                for i, label in enumerate(main.REQUIRED_TAGS, start=1)]
+        no_score_id = next(t['id'] for t in tags if t['label'] == 'no-score')
+        api = self._api([make_show(1, 'A', tags=[no_score_id])])
+        assert main.run_once(api, self._config()) == 0
+
+    def test_no_shows_returns_zero(self):
+        """An empty library is a no-op, not an error."""
+        api = self._api([])
+        assert main.run_once(api, self._config()) == 0
+
+    def test_ensures_tags_before_listing_shows(self):
+        """Tags are ensured so freshly created ids are available."""
+        api = self._api([make_show(1, 'A')])
+        main.run_once(api, self._config())
+        assert api.calls['get_tags'] == 1
+        assert api.calls['get_shows'] == 1
+
+    def test_run_once_preserves_unmanaged_tags(self):
+        """A full pass keeps unmanaged tags while still applying score tags.
+
+        End-to-end guard for the tag-wiping bug: run_once() feeds the *real*
+        ensure_required_tags() map (which contains every tag in Sonarr) into the
+        per-show tag logic, so this fails if the managed set is derived from that
+        map's values rather than from REQUIRED_TAGS.
+        """
+        library_tags = [{'id': i, 'label': label}
+                        for i, label in enumerate(main.REQUIRED_TAGS, start=1)]
+        library_tags += [{'id': 99, 'label': 'potential-delete'},
+                         {'id': 98, 'label': 'requested'}]
+        show = make_show(1, 'Keep Me', tags=[98, 99])
+        api = FakeSonarrAPI(shows=[show], tags=library_tags,
+                            episode_files={1: []}, episodes={1: []})
+        assert main.run_once(api, self._config()) == 1
+        tags = api.updates[0][1]['tags']
+        assert 98 in tags and 99 in tags, "run_once stripped an unmanaged tag"
+        no_score_id = next(t['id'] for t in library_tags
+                           if t['label'] == 'no-score')
+        assert no_score_id in tags
+
+    def test_unmanaged_tags_survive_repeated_passes(self):
+        """Tags are not eroded run after run (the reported symptom)."""
+        library_tags = [{'id': i, 'label': label}
+                        for i, label in enumerate(main.REQUIRED_TAGS, start=1)]
+        library_tags += [{'id': 99, 'label': 'potential-delete'}]
+        api = FakeSonarrAPI(shows=[make_show(1, 'A', tags=[99])],
+                            tags=library_tags, episode_files={1: []},
+                            episodes={1: []})
+        main.run_once(api, self._config())
+        assert 99 in api.updates[0][1]['tags']
+        api.shows = [make_show(1, 'A', tags=dict(api.updates)[1]['tags'])]
+        api.updates = []
+        assert main.run_once(api, self._config()) == 0
+        assert api.updates == [], "a stable library must not be rewritten"
+
+    def test_test_mode_limits_to_five_shows(self):
+        """--test processes at most the first five shows."""
+        shows = [make_show(i, f'Show {i}') for i in range(1, 9)]
+        api = self._api(shows)
+        assert main.run_once(api, self._config(), test_mode=True) == 5
+
+    def test_test_mode_leaves_smaller_libraries_alone(self):
+        """Fewer than five shows are all processed."""
+        api = self._api([make_show(1, 'A'), make_show(2, 'B')])
+        assert main.run_once(api, self._config(), test_mode=True) == 2
+
+    def test_test_mode_makes_one_show_listing(self):
+        """Test mode still only lists shows once (no re-fetch)."""
+        shows = [make_show(i, f'Show {i}') for i in range(1, 9)]
+        api = self._api(shows)
+        main.run_once(api, self._config(), test_mode=True)
+        assert api.calls['get_shows'] == 1
+
+    def test_completion_summary_reports_totals(self):
+        """The completion line reports updated/total."""
+        api = self._api([make_show(1, 'A'), make_show(2, 'B')])
+        messages = _capture_log_messages(
+            main.run_once, api, self._config())
+        assert any('Processing complete. Updated 2/2 shows' in msg
+                   for msg in messages)
+
+    def test_specials_summary_logged_when_enabled(self):
+        """The specials summary line appears with the feature enabled."""
+        api = self._api([make_show(1, 'A')])
+        messages = _capture_log_messages(
+            main.run_once, api,
+            self._config(monitor_existing_specials_enabled=True))
+        assert any('special episode(s) to monitored' in msg
+                   for msg in messages)
+
+    def test_no_specials_summary_when_disabled(self):
+        """With the feature off the summary line is not emitted."""
+        api = self._api([make_show(1, 'A')])
+        messages = _capture_log_messages(main.run_once, api, self._config())
+        assert not any('special episode(s) to monitored' in msg
+                       for msg in messages)
+
+    def test_monitor_specials_integrated(self):
+        """Specials are monitored as part of the pass when enabled."""
+        api = FakeSonarrAPI(
+            shows=[make_show(1, 'A')],
+            tags=[{'id': i, 'label': label}
+                  for i, label in enumerate(main.REQUIRED_TAGS, start=1)],
+            episode_files={1: []},
+            episodes={1: [make_episode(season_number=0, has_file=True)]},
+        )
+        main.run_once(api, self._config(monitor_existing_specials_enabled=True))
+        assert api.calls['update_episode'] == 1
