@@ -28,6 +28,7 @@ import os
 import re
 
 import pytest
+import yaml
 
 import main
 
@@ -289,7 +290,7 @@ class TestWorkflowKeepsTheParityCheckUsable:
     """The workflow is what makes this file a *check* rather than a unit test.
 
     ``parity`` is a required status check in both repositories, which turns
-    three harmless-looking details of ``.github/workflows/tests.yml`` into load
+    four harmless-looking details of ``.github/workflows/tests.yml`` into load
     bearing invariants. None of them is visible to the tests above: they can all
     break while ``pytest`` stays green locally, and the damage is a merge-gated
     repository rather than a red build.
@@ -305,18 +306,78 @@ class TestWorkflowKeepsTheParityCheckUsable:
                                'tests.yml'), encoding='utf-8') as handle:
             return handle.read()
 
-    def test_parity_job_still_named_parity(self):
-        """The job's name is the required check's context.
+    def _workflow_document(self):
+        """Return this repository's tests workflow, parsed as YAML.
 
-        Renaming it to ``twin-parity`` (or matrixing it, which yields
-        ``parity (3.12)``) leaves the required ``parity`` context reporting
-        nothing at all, and an unreported required check blocks every merge
-        instead of failing visibly.
+        Two of the invariants below cannot be asserted from text at all. This
+        workflow's own comment block names ``paths:`` and ``branches:`` while
+        explaining why filters must not be used, so ``'paths:' in text`` is True
+        in a file that has no filters; and a rule matching the ``parity`` line
+        still matches a job that has grown a ``strategy:`` block, even though
+        that renames the required check. Parsing separates the structure from
+        the prose that describes it.
         """
-        assert re.search(r'^  parity:$', self._workflow(), re.MULTILINE), (
-            "the workflow no longer declares a job literally named `parity`. "
-            "That name is the required status check context in both repos; "
-            "renaming the job makes every PR unmergeable.")
+        with open(os.path.join(REPO_ROOT, '.github', 'workflows',
+                               'tests.yml'), encoding='utf-8') as handle:
+            return yaml.safe_load(handle)
+
+    def _triggers(self):
+        """Return the workflow's trigger mapping.
+
+        PyYAML implements YAML 1.1, where a bare ``on:`` key parses as the
+        boolean ``True`` rather than the string ``'on'``, so both spellings are
+        accepted instead of letting a quoted key turn this into a KeyError.
+        """
+        document = self._workflow_document()
+        triggers = document.get('on', document.get(True))
+        assert isinstance(triggers, dict), (
+            f"the workflow's `on:` block parsed as {triggers!r} instead of a "
+            "mapping of triggers. `parity` is required in both repositories, so "
+            "a run that never starts leaves the check unreported - which blocks "
+            "every merge instead of failing visibly.")
+        return triggers
+
+    def test_triggers_are_unfiltered(self):
+        """The workflow must start on every push and PR, with no filters.
+
+        A ``paths:`` or ``branches:`` filter skips the whole run - ``parity``
+        included - on exactly the PRs that touch those files. A required check
+        that is skipped rather than failed reports as *Expected*, so the PR is
+        blocked with no red X to explain it. Substring matching cannot detect
+        these keys here: the comment block above ``jobs:`` names both of them.
+        """
+        triggers = self._triggers()
+        assert sorted(triggers) == ['pull_request', 'push'], (
+            f"the workflow now triggers on {sorted(triggers)} instead of a bare "
+            "`push:`/`pull_request:`. `parity` is a required check, so a trigger "
+            "that stops the run blocks merges rather than failing visibly.")
+        for name, settings in sorted(triggers.items()):
+            assert settings is None, (
+                f"the `{name}:` trigger carries settings ({settings!r}). An "
+                "unfiltered trigger is load-bearing: a `paths:`/`branches:` "
+                "filter would skip `parity` on precisely the PRs that have to "
+                "report the check.")
+
+    def test_required_jobs_are_declared_but_not_matrixed(self):
+        """A matrix renames the job, and the name is the required context.
+
+        The text assertion this replaces could not see it: a job that has grown
+        a ``strategy:`` block still matches its own job line, yet the reported
+        context becomes ``parity (3.12)`` and the required ``parity`` check stops
+        reporting. The workflow's own comment about the ``lint`` job documents
+        the same trap, so both required names are asserted.
+        """
+        jobs = self._workflow_document().get('jobs') or {}
+        for name in ('parity', 'lint'):
+            job = jobs.get(name)
+            assert job is not None, (
+                f"the workflow no longer declares a job named `{name}`. That "
+                "name is the required status check context in both repos; "
+                "removing or renaming it makes every PR unmergeable.")
+            assert 'strategy' not in job, (
+                f"the `{name}` job grew a `strategy:` block. Matrixing it "
+                f"renames the reported job to `{name} (3.12)`, which is not the "
+                "required context - the check silently stops reporting.")
 
     def test_sibling_ref_is_probed_before_it_is_used(self):
         """The sibling ref must be resolved by probing, never assumed.
