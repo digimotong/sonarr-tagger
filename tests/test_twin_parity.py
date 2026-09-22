@@ -289,11 +289,21 @@ class TestDocumentationScaffoldingMatches:
 class TestWorkflowKeepsTheParityCheckUsable:
     """The workflow is what makes this file a *check* rather than a unit test.
 
-    ``parity`` is a required status check in both repositories, which turns
-    four harmless-looking details of ``.github/workflows/tests.yml`` into load
-    bearing invariants. None of them is visible to the tests above: they can all
-    break while ``pytest`` stays green locally, and the damage is a merge-gated
-    repository rather than a red build.
+    The ruleset on ``main`` requires six status checks - ``lint``,
+    ``dockerfile``, ``parity``, and the three expanded ``test (3.12)``/``(3.13)``
+    /``(3.14)`` contexts - which turns six harmless-looking details of
+    ``.github/workflows/tests.yml`` into load bearing invariants. None of them is
+    visible to the tests above: they can all break while ``pytest`` stays green
+    locally, and the damage is a merge-gated repository rather than a red build.
+
+    Because that list is longer than the sibling's guard originally covered,
+    every required context is asserted here rather than only the two the
+    repositories share: ``dockerfile`` was required but unpinned, and the matrix
+    that produces the three ``test`` contexts was not pinned either - dropping a
+    version would have stopped a required check reporting with nothing to catch
+    it. flac-health-reencode asserts the mirror-image rule (a matrix on ITS
+    required jobs is the failure), so the two guards are deliberately not copies
+    of each other; each matches its own ruleset.
 
     ``main.py`` gets normalised twin comparison; this file does not, so what is
     asserted here is the structure the check depends on, not wording. If one of
@@ -359,25 +369,83 @@ class TestWorkflowKeepsTheParityCheckUsable:
                 "report the check.")
 
     def test_required_jobs_are_declared_but_not_matrixed(self):
-        """A matrix renames the job, and the name is the required context.
+        """The required jobs must exist, un-matrixed and un-renamed.
 
         The text assertion this replaces could not see it: a job that has grown
         a ``strategy:`` block still matches its own job line, yet the reported
         context becomes ``parity (3.12)`` and the required ``parity`` check stops
         reporting. The workflow's own comment about the ``lint`` job documents
-        the same trap, so both required names are asserted.
+        the same trap.
+
+        Every context the ruleset requires is listed, not just the two the
+        sibling happens to share: ``dockerfile`` is required too, so an earlier
+        version of this test left it unpinned and a rename or matrix of that job
+        would have blocked every PR with nothing here to catch it. The name also
+        has to be the bare one - a job-level ``name:`` replaces the reported
+        context just as a matrix renames it.
         """
         jobs = self._workflow_document().get('jobs') or {}
-        for name in ('parity', 'lint'):
+        for name in ('parity', 'lint', 'dockerfile'):
             job = jobs.get(name)
             assert job is not None, (
                 f"the workflow no longer declares a job named `{name}`. That "
-                "name is the required status check context in both repos; "
+                "name is a required status check context in this repository; "
                 "removing or renaming it makes every PR unmergeable.")
             assert 'strategy' not in job, (
                 f"the `{name}` job grew a `strategy:` block. Matrixing it "
                 f"renames the reported job to `{name} (3.12)`, which is not the "
                 "required context - the check silently stops reporting.")
+            assert 'name' not in job, (
+                f"the `{name}` job grew a job-level `name:`. That replaces the "
+                f"reported context outright, so the required `{name}` check "
+                "stops reporting and every PR is blocked.")
+
+    def test_required_jobs_cannot_be_skipped(self):
+        """A job that does not run reports nothing, so `if:`/`needs:` are traps.
+
+        A matrix renames the check and a `name:` replaces it; these two stop it
+        from being reported at all, which is the same silent block by another
+        route. An `if:` that only holds on push (``github.event_name == 'push'``)
+        leaves every pull request without the check, and a ``needs:`` chain
+        inherits the skip: one guarded job upstream takes the required check down
+        with it. Neither is visible to the tests above, and both leave the
+        repository merge-gated rather than failing visibly.
+        """
+        jobs = self._workflow_document().get('jobs') or {}
+        for name in ('parity', 'lint', 'dockerfile'):
+            job = jobs.get(name) or {}
+            for key in ('if', 'needs'):
+                assert key not in job, (
+                    f"the `{name}` job grew a `{key}:`. A skipped job reports "
+                    f"no status at all, so the required `{name}` check would "
+                    "leave every PR blocked as `Expected` instead of failing "
+                    "visibly. Guard or chain a job that is NOT required, or "
+                    "update the ruleset in the same change.")
+
+    def test_the_matrixed_job_keeps_every_required_python_version(self):
+        """The required contexts here are `test (3.12)`, `(3.13)` and `(3.14)`.
+
+        This is the inverse of the assertion above and of its counterpart in the
+        flac repo, where a matrix on a required job is the failure and here its
+        *absence* is: the ruleset requires three expanded contexts, so dropping a
+        version (or removing the matrix) stops that context reporting and blocks
+        every PR - while the workflow still looks like it is testing Python.
+        Pinning the exact list means the ruleset can only be narrowed by changing
+        both sides deliberately, in one commit.
+
+        Only the version list is pinned. The matrix may still grow other keys
+        (an ``os:`` axis, an ``include:``), because this asserts the required
+        contexts are all still produced, not that the matrix is frozen.
+        """
+        jobs = self._workflow_document().get('jobs') or {}
+        test_job = jobs.get('test') or {}
+        matrix = (test_job.get('strategy') or {}).get('matrix') or {}
+        versions = matrix.get('python-version')
+        assert sorted(versions or []) == ['3.12', '3.13', '3.14'], (
+            f"the `test` job's python-version matrix is {versions!r}, but the "
+            "ruleset requires the contexts `test (3.12)`, `test (3.13)` and "
+            "`test (3.14)`. Each required version must stay in the matrix: a "
+            "removed one stops that context reporting and blocks every PR.")
 
     def test_sibling_ref_is_probed_before_it_is_used(self):
         """The sibling ref must be resolved by probing, never assumed.
