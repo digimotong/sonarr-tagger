@@ -1,9 +1,8 @@
 """Shared pytest fixtures for the sonarr-tagger test suite.
 
-The suite is deliberately dependency-free beyond pytest: ``FakeSession`` mimics
-the small slice of the ``requests.Session`` surface that ``SonarrAPI`` uses, and
-``FakeSonarrAPI`` records call counts so tests can assert that the client does
-not make redundant network requests.
+``FakeSession`` mimics the small slice of ``requests.Session`` that ``SonarrAPI``
+uses, and ``FakeSonarrAPI`` records call counts so tests can assert that the
+client makes no redundant requests.
 """
 
 import faulthandler
@@ -13,13 +12,12 @@ import pytest
 from requests.exceptions import HTTPError, RequestException
 from requests.structures import CaseInsensitiveDict
 
-# The application module lives in a hyphenated directory, so rely on the root
-# conftest.py having already placed it on sys.path.
+# The app module lives in a hyphenated directory; the root conftest.py puts it
+# on sys.path.
 import main  # noqa: E402  pylint: disable=wrong-import-position
 
-# Any test that reaches a real sleep is a bug (see the ``forbid_real_sleep``
-# fixture), so a hang means the guard is missing - not that we should wait. Dump
-# every thread's traceback after a few seconds and let the runner kill the file.
+# Any test that reaches a real sleep is a bug (see forbid_real_sleep), so a hang
+# means that guard is missing. Dump tracebacks and let the runner kill the file.
 _HANG_TIMEOUT_SECONDS = float(os.getenv('PYTEST_HANG_TIMEOUT', '10'))
 faulthandler.dump_traceback_later(_HANG_TIMEOUT_SECONDS, exit=True)
 
@@ -58,8 +56,7 @@ class FakeSession:
 
     def __init__(self, responses=None):
         self.responses = responses or {}
-        # Mirrors requests.Session.headers, which is a CaseInsensitiveDict so that
-        # header lookups are case-insensitive in production as well as in tests.
+        # Case-insensitive, mirroring requests.Session.headers.
         self.headers = CaseInsensitiveDict()
         self.calls = []
 

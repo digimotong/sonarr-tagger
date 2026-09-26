@@ -15,7 +15,7 @@ from conftest import FakeResponse, FakeSession
 BASE_URL = 'http://sonarr:8989'
 API_KEY = 'test-key'
 
-# (method name on the client, HTTP verb it must issue, kwargs identifying the call)
+# (method name on the client, HTTP verb it must issue)
 ENDPOINT_CASES = [
     ('get_shows', 'get'),
     ('get_show', 'get'),

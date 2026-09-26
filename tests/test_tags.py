@@ -293,7 +293,7 @@ class TestMainPollLoop:
             with pytest.raises(KeyboardInterrupt):
                 main.main()
 
-        # First a failure retry (300s), then a normal interval sleep.
+        # A failure retry (300s), then a normal interval sleep.
         assert sleeps == [300, 20 * 60]
         assert any('Script failed: boom' in message
                    for message in collector.messages)

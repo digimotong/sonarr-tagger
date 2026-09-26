@@ -48,8 +48,7 @@ class TestVersionDocumentation:
 class TestEnvironmentDocumentation:
     """Every environment variable the code reads is documented."""
 
-    # Kept explicit rather than scraped from the source so an accidental rename
-    # fails here instead of silently matching a new name.
+    # Explicit rather than scraped from the source, so a rename fails here.
     DOCUMENTED_VARS = (
         'SONARR_URL',
         'SONARR_API_KEY',
@@ -77,7 +76,7 @@ class TestEnvironmentDocumentation:
         source = _read_source()
         used = set(re.findall(r"os\.(?:getenv|environ\[)\(?'?([A-Z_]+)'?",
                               source))
-        # os.environ['X'] indexes are matched by a second, simpler pattern.
+        # A second, simpler pattern for os.environ['X'] indexes.
         used |= set(re.findall(r"os\.environ\['([A-Z_]+)'\]", source))
         undocumented = sorted(name for name in used
                               if name not in readme or name not in env_example)
@@ -108,9 +107,8 @@ class TestOperationalDocumentation:
 
     def test_readme_documents_interval_default(self, readme):
         """The documented default matches the code's default."""
-        # Match the environment-variable table row, e.g.
-        # | `INTERVAL_MINUTES` | `20` | ... |  -- a looser pattern also matches the
-        # prose explaining that 0 is rejected, which is not a default.
+        # The env-var table row only: a looser pattern also matches the prose
+        # explaining that 0 is rejected, which is not a default.
         defaults = re.findall(
             r'\|\s*`INTERVAL_MINUTES`\s*\|\s*`(\d+)`\s*\|', readme)
         assert defaults, "INTERVAL_MINUTES default is not documented"

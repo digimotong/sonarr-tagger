@@ -1,11 +1,8 @@
 """Root conftest.py - makes the application module importable under pytest.
 
-The production code lives in ``sonarr-tagger/`` (a hyphenated directory, which is
-not a valid Python package name and therefore cannot be imported normally). This
-shim puts that directory on ``sys.path`` so tests can simply ``import main``.
-
-It also ensures the repository root is importable so the ``tests`` package
-resolves consistently regardless of the directory pytest is invoked from.
+The production code lives in ``sonarr-tagger/``, a hyphenated directory that is
+not a valid package name. This shim puts it (and the repo root) on ``sys.path``
+so tests can simply ``import main``.
 """
 
 import os
