@@ -12,17 +12,15 @@ env:
 permissions:
   contents: read
 
-# Queue release runs instead of cancelling them: a cancelled run could leave a
-# release half-published.
+# Queue release runs instead of cancelling: a cancelled run could leave a release
+# half-published.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
-  # Prefixed "release-" to keep job names unique across workflows: tests.yml also
-  # defines `lint` and `test`, and GitHub warns that a check name shared by two
-  # workflows gives ambiguous results for required status checks - which can block
-  # PRs from ever merging. Renaming here (not in tests.yml) keeps the checks that
-  # gate `main` named exactly as they are today.
+  # Prefixed "release-" because tests.yml also defines `lint` and `test`, and
+  # GitHub treats a check name shared by two workflows as ambiguous for required
+  # status checks. Renaming here keeps the checks gating `main` as they are.
   release-lint:
     runs-on: ubuntu-latest
     steps:
@@ -65,15 +63,15 @@ jobs:
           version="$(grep -oP '^VERSION = "\K[^"]+' sonarr-tagger/main.py)"
           echo "main.py VERSION: $version"
           echo "release tag:     $TAG"
-          # Fail before anything is published rather than shipping an image whose
-          # reported version and image tag disagree.
+          # Fail before anything is published, rather than shipping an image
+          # whose reported version and tag disagree.
           test "v$version" = "$TAG"
 
   build-and-push:
     runs-on: ubuntu-latest
     needs: [release-lint, release-test, verify-version]
-    # workflow_dispatch skips verify-version, and a skipped need would otherwise
-    # cause this job to be skipped too.
+    # workflow_dispatch skips verify-version, and a skipped need would skip this
+    # job too.
     if: always() && !failure() && !cancelled()
 
     steps:
@@ -91,10 +89,8 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.DOCKERHUB_REPO }}
-          # On a release tag the semver line produces X.Y.Z and also flips
-          # latest on by itself (the action's 'auto' default), so the raw line
-          # below is what keeps :latest working for workflow_dispatch runs.
-          # Removing it would leave latest stale / missing - not a bug to fix.
+          # The semver line already flips `latest` on by itself; the raw line
+          # keeps :latest working for workflow_dispatch runs.
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}

@@ -299,9 +299,8 @@ class TestTagUpdates:
         config = config or self._config()
         if has_mixed_release_groups is not None:
             has_mixed = has_mixed_release_groups
-        # _update_show_tags re-reads the show before writing, so the show must be
-        # reachable from the fake's library. Registering it keeps each test's
-        # setup focused on the tag logic under test.
+        # _update_show_tags re-reads before writing, so the show must be in the
+        # fake's library.
         if not any(s['id'] == show['id'] for s in api.shows):
             api.shows.append(dict(show))
         data = main.TagUpdateData(
@@ -410,13 +409,12 @@ class TestNoNPlusOneRequests:
     """Tag lookups must not scale with the number of tags on a show.
 
     The original implementation called get_tags() inside a comprehension over the
-    show's existing tags, so a show with N managed tags caused N HTTP requests -
-    per show, every cycle. That is an N+1 that would hammer a large Sonarr.
+    show's existing tags, so N managed tags caused N HTTP requests - per show,
+    every cycle. That is an N+1 that would hammer a large Sonarr.
     """
 
     def _run(self, api, show):
-        # The re-read before the write means the show must exist in the fake's
-        # library (see the sibling helper in TestTagUpdates).
+        # The pre-write re-read needs the show in the fake's library.
         if not any(s['id'] == show['id'] for s in api.shows):
             api.shows.append(dict(show))
         data = main.TagUpdateData(
@@ -460,7 +458,7 @@ class TestNoNPlusOneRequests:
         api = FakeSonarrAPI()
         show = make_show(tags=[full_tag_map['requested'], TAG_MAP['motong'],
                                full_tag_map['potential-delete']])
-        # Registered so the pre-write re-read can resolve the show.
+        # The pre-write re-read must resolve the show, so register it.
         api.shows.append(dict(show))
         data = main.TagUpdateData(
             sonarr=main.SonarrContext(api=api, show=show,

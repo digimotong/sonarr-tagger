@@ -19,10 +19,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.14 is included because it is what the Dockerfile now pins: test the
-        # interpreter the shipped image actually runs. The `lint` job below stays
-        # on a single version on purpose - matrixing it would rename the required
-        # status check from `lint` to `lint (3.12)` and block every merge.
+        # 3.14 is what the Dockerfile pins, so the shipped interpreter is tested.
+        # `lint` stays on one version: matrixing it would rename the required
+        # `lint` check to `lint (3.12)` and block every merge.
         python-version: ['3.12', '3.13', '3.14']
 
     steps:
@@ -40,15 +39,12 @@ jobs:
           pip install -r requirements-dev.txt
         shell: bash
 
-      # Coverage flags are passed explicitly (not via pytest.ini addopts) so that
-      # running a single test file locally does not trip the coverage floor.
-      # The 98 floor is the measured value rounded down: only the
-      # `if __name__ == "__main__":` line is unreachable under import.
+      # Explicit, not via pytest.ini addopts, so a single-file local run does not
+      # trip the coverage floor. The 98 floor is the measured value rounded down:
+      # only the `if __name__ == "__main__":` line is unreachable under import.
       - name: Run pytest
-        # PYTEST_HANG_TIMEOUT (read by tests/conftest.py) is a backstop: the
-        # autouse sleep guard should turn any unbounded poll loop into an immediate
-        # failure, and if that guard is ever removed this still fails the job
-        # instead of burning its full timeout.
+        # PYTEST_HANG_TIMEOUT (tests/conftest.py) is a backstop: if the sleep
+        # guard is ever removed, this still fails the job instead of timing out.
         run: |
           python -m pytest -v --cov=main --cov-report=term-missing --cov-fail-under=98
         shell: bash
@@ -76,8 +72,8 @@ jobs:
         run: pylint sonarr-tagger
         shell: bash
 
-  # The Dockerfile cannot be exercised by the unit tests: build it and prove the
-  # two properties the tests cannot see (it starts, and it does not run as root).
+  # The unit tests cannot exercise the Dockerfile, so build it and check the two
+  # properties they cannot see: it starts, and it does not run as root.
   dockerfile:
     runs-on: ubuntu-latest
     steps:
@@ -108,20 +104,15 @@ jobs:
           test "$status" = "1"
           echo "$output" | grep -q "Configuration error"
 
-  # sonarr-tagger and radarr-tagger are near-duplicates maintained as separate
-  # repositories, and each auto-deploys on its own. A hardening fix applied to
-  # one therefore misses the other - which is how this sibling ended up without
-  # the empty-API-key guard. tests/test_twin_parity.py compares the logic that
-  # must stay identical, but it needs both checkouts to do so, which the plain
-  # `test` job above cannot provide.
+  # tests/test_twin_parity.py compares the logic the two near-duplicate
+  # repositories must share, but needs both checkouts, which the `test` job above
+  # cannot provide.
   #
-  # `parity` is a required status check in both repositories, so its *name* is
-  # load-bearing: renaming the job (or matrixing it, which would rename it to
-  # `parity (3.12)`) leaves the required `parity` context reporting nothing, and
-  # an unreported required check blocks every merge instead of failing visibly.
-  # The bare `push:`/`pull_request:` triggers above are load-bearing in the same
-  # way - a `paths:`/`branches:` filter would skip the whole run on matching
-  # PRs, which is precisely when the required check has to report.
+  # `parity` is a required status check, so its *name* is load-bearing: renaming
+  # or matrixing the job leaves the required context reporting nothing, which
+  # blocks every merge. The bare `push:`/`pull_request:` triggers above matter for
+  # the same reason - a `paths:`/`branches:` filter would skip the run on exactly
+  # the PRs where the check must report.
   parity:
     runs-on: ubuntu-latest
     steps:
@@ -130,21 +121,18 @@ jobs:
         with:
           path: sonarr-tagger
 
-      # Prefer the matching branch on the sibling over its default branch. The
-      # twin change lands as its own PR, so the sibling's default branch would
-      # still hold the old code and this job would fail until that PR merged.
-      # github.head_ref is only set on pull_request runs, so a push to main
-      # falls back to the ref name (main) on both sides.
+      # Prefer the matching branch on the sibling over its default branch: the
+      # twin change lands as its own PR, so the default branch still holds the old
+      # code and this job would fail until that PR merged. github.head_ref is only
+      # set on pull_request runs, so a push to main falls back to the ref name on
+      # both sides.
       #
-      # The branch is probed before it is used, because it does not always exist
-      # on the sibling: Dependabot names its branches itself and per repository
-      # (`dependabot/pip/...`), so a weekly bump PR here has no counterpart
-      # there. Feeding that name straight to `ref` would fail the checkout, and
-      # once this job is a required status check that would make every
-      # dependency PR permanently unmergeable - including the action bumps that
-      # keep the SHA pins from going stale. An empty `ref` means "the target
-      # repository's default branch", which is the honest comparison for a
-      # change that is not a twin change.
+      # The branch is probed first because it does not always exist there:
+      # Dependabot names its branches per repository, so a weekly bump PR here has
+      # no counterpart. Feeding that name straight to `ref` would fail the
+      # checkout and, with `parity` required, make every dependency PR
+      # permanently unmergeable. An empty `ref` means "the default branch", which
+      # is the honest comparison for a change that is not a twin change.
       - name: Resolve the sibling ref
         id: sibling
         run: |
@@ -178,13 +166,12 @@ jobs:
           pip install -r sonarr-tagger/requirements-dev.txt
         shell: bash
 
-      # Only the parity file: the sibling's own suite runs in its own workflow,
-      # and its coverage floor belongs there. The sibling repo is checked out
-      # without its dependencies, so nothing else can be imported from it.
+      # Only the parity file: the sibling's own suite runs in its own workflow and
+      # its coverage floor belongs there.
       #
-      # PARITY_REQUIRE_SIBLING turns the module's "sibling not checked out" skip
-      # into a failure. Without it a botched sibling checkout would exit 0 having
-      # asserted nothing, and this job is meant to be a required status check.
+      # PARITY_REQUIRE_SIBLING turns the "sibling not checked out" skip into a
+      # failure; without it a botched checkout would exit 0 having asserted
+      # nothing, and this job is a required status check.
       - name: Run the twin-divergence check
         run: |
           python -m pytest sonarr-tagger/tests/test_twin_parity.py -v

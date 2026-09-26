@@ -14,12 +14,8 @@ from typing import Dict, List, Optional, Set
 import requests
 from requests.exceptions import RequestException
 
-# Single source of truth for the tags this tool manages (creates and assigns).
-# Any tag in this list is stripped from every show before the current desired
-# state is applied, and created on demand when missing from Sonarr.
-# NOTE: 'motong', '4k' and 'mixed-release-groups' are only re-applied when
-# TAG_MOTONG / TAG_4K / TAG_MIXED_RELEASE_GROUPS are enabled, so disabling a
-# flag also removes that tag from all shows.
+# Tags this tool owns: stripped from every show, then re-applied by policy.
+# motong/4k/mixed-release-groups count as owned only while their flag is enabled.
 REQUIRED_TAGS = [
     'negative-score',
     'positive-score',
@@ -29,30 +25,23 @@ REQUIRED_TAGS = [
     'mixed-release-groups'
 ]
 
-# HTTP calls block indefinitely when no timeout is supplied, which would leave the
-# long-running update loop wedged forever on a half-open connection.
+# Without a timeout a half-open connection wedges the poll loop forever.
 REQUEST_TIMEOUT = 30
 
-# Environment variables that must be present and non-empty for the tool to run.
 REQUIRED_ENV_VARS = ('SONARR_URL', 'SONARR_API_KEY')
 
-# Bounds for INTERVAL_MINUTES. A zero/negative interval turns the poll loop into
-# an unbounded busy loop (time.sleep(0) returns instantly), and an absurd value
-# silently stops the container from ever updating again. Reject both at startup.
+# 0 busy-loops (time.sleep(0)); a huge value stops updates forever. Both are
+# rejected at startup rather than clamped.
 MIN_INTERVAL_MINUTES = 1
 MAX_INTERVAL_MINUTES = 525_600  # one year
 
-# Log levels accepted in LOG_LEVEL, as a case-insensitive lookup.
 VALID_LOG_LEVELS = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
 
 def _raise_on_auth_failure(response):
     """Raise ``AuthenticationError`` when Sonarr rejects the API key.
 
-    Must run *before* ``response.raise_for_status()``: 401 and 403 are otherwise
-    flattened into a generic ``HTTPError`` and retried forever by the poll loop.
-    This was a real, silent failure mode - three stale processes with an empty
-    API key sat in the retry loop for a day, emitting a 401 every five minutes
-    while never tagging anything, and the container reported nothing wrong.
+    Must run before ``response.raise_for_status()``, or 401/403 becomes a
+    generic ``HTTPError`` and the poll loop retries it forever.
     """
     if getattr(response, 'status_code', None) in (401, 403):
         raise AuthenticationError(
@@ -88,8 +77,7 @@ class SonarrAPI:
     def get_show(self, series_id: int) -> Dict:
         """Fetch a single show from Sonarr.
 
-        Used to re-read immediately before a write so the PUT is not built from
-        a resource fetched at the start of the pass (see _update_show_tags).
+        Used to re-read immediately before a write (see _update_show_tags).
         """
         endpoint = f"{self.base_url}/api/v3/series/{series_id}"
         try:
@@ -160,13 +148,10 @@ class SonarrAPI:
                      season_number: Optional[int] = None) -> List[Dict]:
         """Fetch episodes for a show from Sonarr.
 
-        ``season_number`` restricts the request to a single season. The only
-        caller that needs episodes looks exclusively at season 0, so passing it
-        avoids transferring every other season: for a 1,241-episode series the
-        filtered response is 63 episodes / 39 KB instead of 959 KB, and across a
-        full library it cuts the pass from ~11.4 MB to ~1.7 MB. The caller still
-        filters on seasonNumber, so an older Sonarr that ignored the parameter
-        would simply behave as it does today.
+        ``season_number`` restricts the request to one season, which the only
+        caller needs (season 0): a filtered response is far smaller than the
+        whole series. The caller filters on seasonNumber anyway, so an older
+        Sonarr that ignored the parameter behaves as before.
         """
         query = f"seriesId={series_id}"
         if season_number is not None:
@@ -201,15 +186,8 @@ class SonarrAPI:
 class AuthenticationError(RequestException):
     """Raised when Sonarr rejects the API key (HTTP 401 or 403).
 
-    A wrong key is not a transient fault, so it must not be retried: the poll
-    loop would otherwise log one line every five minutes forever while never
-    tagging anything. Treated as fatal so the container exits and its restart
-    policy surfaces the misconfiguration. See ``main()``.
-
-    Subclasses ``RequestException`` because an HTTP failure *is* a request
-    failure: every caller already catches that, so the thousands of request
-    paths keep treating 401 as a failure while ``main()`` can still single this
-    case out to stop retrying.
+    Fatal, not transient - ``main()`` stops retrying. Subclasses
+    ``RequestException`` so existing callers keep treating it as a failure.
     """
 
 def parse_args():
@@ -229,9 +207,8 @@ def parse_args():
 def get_log_level() -> str:
     """Return the validated LOG_LEVEL, falling back to INFO.
 
-    An unrecognised level would otherwise reach ``logging.basicConfig`` and raise
-    a bare ``ValueError`` from deep inside the stdlib; rejecting it here names the
-    offending variable and the accepted values.
+    An unrecognised level would reach ``logging.basicConfig`` and raise a bare
+    ``ValueError``; rejecting it here names the variable and accepted values.
     """
     raw_level = os.getenv('LOG_LEVEL', 'INFO').strip()
     level = raw_level.upper()
@@ -244,10 +221,9 @@ def get_log_level() -> str:
 def get_interval_minutes() -> int:
     """Return the validated INTERVAL_MINUTES, defaulting to 20.
 
-    Guards against the two ways this value silently breaks the poll loop: a
-    non-positive value makes ``time.sleep()`` return immediately (a busy loop that
-    hammers the Sonarr API), and a non-integer or absurd value either crashes the
-    container on startup or stops it from ever updating at full speed again.
+    Guards the two ways this breaks the poll loop: a non-positive value makes
+    ``time.sleep()`` return immediately (busy loop hammering the API), and a
+    non-integer or absurd value crashes startup or stops updates forever.
     """
     raw_interval = os.getenv('INTERVAL_MINUTES', '20').strip()
     try:
@@ -266,9 +242,8 @@ def get_interval_minutes() -> int:
 
 def get_config_from_env():
     """Load configuration from environment variables"""
-    # Fail fast with a message that names the culprits: indexing os.environ directly
-    # raised an unhelpful KeyError traceback, and an empty value was only caught
-    # later by the explicit check below with a vaguer message.
+    # Name the missing variables: indexing os.environ gave an opaque KeyError,
+    # and an empty value was only caught later with a vaguer message.
     missing = [name for name in REQUIRED_ENV_VARS
                if not os.getenv(name, '').strip()]
     if missing:
@@ -358,20 +333,19 @@ def _process_episode_files(
         episode_files = api.get_episode_files(show_id)
 
         if check_mixed_release_groups:
-            # Group episodes by season and track release groups per season
+            # Release groups per season, to spot a season with more than one.
             season_release_groups = {}
             for ep_file in episode_files:
                 season_number = ep_file.get('seasonNumber')
-                if season_number is None or season_number == 0:  # Skip Specials (season 0)
+                if season_number is None or season_number == 0:  # skip Specials
                     continue
 
+                # An empty string is a valid release group, so do not filter it out.
                 release_group = ep_file.get('releaseGroup', '')
-                # Treat empty string as a valid release group
                 if season_number not in season_release_groups:
                     season_release_groups[season_number] = set()
                 season_release_groups[season_number].add(release_group)
 
-            # Check if any season has more than one unique release group
             for release_groups in season_release_groups.values():
                 if len(release_groups) > 1:
                     has_mixed_release_groups = True
@@ -400,13 +374,9 @@ def _merge_fresh_tags(
         new_tag_ids: List[int]) -> List[int]:
     """Recompute the tags to write from a freshly read show.
 
-    ``_update_show_tags`` decides its tag list from a snapshot that can be
-    minutes old, and Sonarr has no partial-update endpoint for series
-    (/api/v3/series/editor returns 404), so the PUT carries the whole resource.
-    Re-reading the show is therefore not sufficient on its own: if the user added
-    a tag while the pass was running, writing the stale list would drop it. This
-    keeps every unmanaged tag the show has *now* and re-applies this tool's own
-    tags on top, so the fresh state wins.
+    Sonarr has no partial-update endpoint, so the PUT carries the whole resource;
+    re-reading alone still drops a tag the user added during the pass. This keeps
+    every unmanaged tag the show has now and re-applies our own.
     """
     fresh_current_tags = set(fresh_show.get('tags', []))
     if fresh_current_tags == current_tags:
@@ -417,8 +387,7 @@ def _merge_fresh_tags(
         fresh_show.get('title'), sorted(current_tags), sorted(fresh_current_tags))
     merged_tag_ids = [tag_id for tag_id in fresh_current_tags
                       if tag_id not in managed_tag_ids]
-    # Preserve the order the tags were computed in (score tag first, then the
-    # optional ones) minus any that the fresh read already lists.
+    # Preserve the order the tags were computed in, minus those already listed.
     for tag_id in new_tag_ids:
         if tag_id not in merged_tag_ids:
             merged_tag_ids.append(tag_id)
@@ -426,15 +395,9 @@ def _merge_fresh_tags(
 
 def _update_show_tags(data: TagUpdateData) -> bool:
     """Update tags for a show based on collected data"""
-    # Fetch tags once instead of calling get_tags() for every existing tag on the
-    # show (that was an N+1: one HTTP round-trip per tag, per show, every cycle).
-    #
-    # The strip set must be derived from REQUIRED_TAGS, never from every value in
-    # ``data.tags.tag_map``: ensure_required_tags() maps *all* tags that exist in
-    # Sonarr (not just the managed ones), so ``set(tag_map.values())`` treated
-    # unrelated tags - 'requested', 'potential-delete', 'no-new-seasons',
-    # 'custom-mkv', auto-tagging tags - as managed and erased them from every show
-    # on every pass. Only the tags this tool owns may be stripped.
+    # Strip managed tags by ID, reusing the label->id map built earlier.
+    # Derive the strip set from REQUIRED_TAGS only: that map holds *every* Sonarr
+    # tag, so set(tag_map.values()) would erase unrelated tags from every show.
     managed_tag_ids = {data.tags.tag_map[label] for label in REQUIRED_TAGS
                        if label in data.tags.tag_map}
     new_tag_ids = [tag_id for tag_id in data.tags.current_tags
@@ -455,14 +418,9 @@ def _update_show_tags(data: TagUpdateData) -> bool:
         new_tag_ids.append(data.tags.tag_map['mixed-release-groups'])
 
     if set(new_tag_ids) != data.tags.current_tags:
-        # Re-read the show immediately before writing. ``data.sonarr.show`` was
-        # captured at the start of a pass that makes several requests per show,
-        # so a user editing tags in the Sonarr UI during the pass would otherwise
-        # have that edit reverted by this PUT, which sends the whole stale
-        # resource back (there is no partial-update endpoint for series:
-        # /api/v3/series/editor returns 404). Re-reading narrows the window from
-        # the length of the pass to a single round-trip; a failed refresh skips
-        # the write rather than gambling on stale data.
+        # Re-read right before writing: the PUT sends the whole resource, so a
+        # tag edit made in the Sonarr UI during this pass would be reverted.
+        # A failed refresh skips the write rather than using stale data.
         try:
             fresh_show = data.sonarr.api.get_show(data.sonarr.show['id'])
         except RequestException:
@@ -511,8 +469,7 @@ def monitor_existing_specials(api: SonarrAPI, show: Dict, config: Dict) -> int:
         return 0
 
     try:
-        # Season 0 only: this function ignores every other season, and the
-        # filtered response is ~6.6x smaller across the library.
+        # Season 0 only: the filtered response is ~6.6x smaller across a library.
         episodes = api.get_episodes(show['id'], season_number=0)
     except RequestException:
         logging.warning("Failed to get episodes for show %s", show['id'])
@@ -520,12 +477,11 @@ def monitor_existing_specials(api: SonarrAPI, show: Dict, config: Dict) -> int:
 
     updated_count = 0
     for episode in episodes:
-        # Filter for season 0 episodes that have a file but are not monitored
+        # Season 0 with a file, not yet monitored.
         if (episode.get('seasonNumber') == 0 and
             episode.get('hasFile', False) and
             not episode.get('monitored', True)):
 
-            # Create a copy of the episode data with monitored set to True
             episode_update = episode.copy()
             episode_update['monitored'] = True
 
@@ -574,11 +530,10 @@ def ensure_required_tags(api: SonarrAPI) -> Dict:
     return tag_map
 
 def run_once(api: SonarrAPI, config: Dict, test_mode: bool = False) -> int:
-    """Run a single update pass over all shows and return the number of shows updated.
+    """Run a single update pass over all shows and return the number updated.
 
-    Extracted from ``main()`` so a full cycle can be exercised in tests without the
-    surrounding ``while True`` loop. ``test_mode`` mirrors the ``--test`` flag and
-    limits the pass to the first 5 shows.
+    Separate from ``main()`` so a full cycle runs without the ``while True`` loop.
+    ``test_mode`` mirrors ``--test`` and limits the pass to the first 5 shows.
     """
     tag_map = ensure_required_tags(api)
     shows = api.get_shows()
@@ -609,10 +564,8 @@ def main():
         print(f"Sonarr Tag Updater v{VERSION}")
         sys.exit(0)
 
-    # Fail fast on bad configuration: without this the tool started up, logged a
-    # generic "Starting" line, and only then died - or worse, ran the poll loop with
-    # a bad interval. A clear message and a non-zero exit is what a container
-    # supervisor needs to report the misconfiguration.
+    # Fail fast: a bad config cannot recover by retrying, so log one line (no
+    # traceback) instead of crash-looping under the restart policy.
     try:
         config = get_config_from_env()
     except ValueError as e:
@@ -636,8 +589,7 @@ def main():
             time.sleep(interval_minutes * 60)
 
         except AuthenticationError as e:
-            # Fatal: a rejected key never becomes valid by waiting, and retrying
-            # hides the problem behind one log line per 5 minutes forever.
+            # Fatal: waiting never fixes a rejected key.
             logging.error("Authentication failed: %s", str(e))
             sys.exit(1)
 
@@ -650,15 +602,12 @@ def setup_logging(log_level):
     """Configure logging"""
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
 
-    # Clear any existing handlers
     logging.root.handlers = []
 
-    # Set up console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(log_level)
     console_handler.setFormatter(logging.Formatter(log_format))
 
-    # Configure root logger
     logging.basicConfig(
         level=log_level,
         format=log_format,

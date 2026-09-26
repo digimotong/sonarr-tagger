@@ -1,27 +1,13 @@
 """Divergence guard for the two sibling containers.
 
-sonarr-tagger and radarr-tagger are near-duplicates: same poll loop, same
-config validation, same tag-management rules, same N+1 history. They are
-maintained as separate repositories and auto-deployed independently, so a
-hardening fix applied to one silently misses the other - which is exactly how
-this sibling ended up without the empty-API-key guard.
+sonarr-tagger and radarr-tagger are near-duplicates maintained as separate,
+independently deployed repositories, so a hardening fix applied to one silently
+misses the other. This test compares the normalised source text of the logic that
+must agree, while allowing the legitimately different parts (product name and
+URL environment variables), and also compares the documentation scaffolding
+(``test_docs.py`` guard names, ``.env.example`` notes, README headings).
 
-A full shared-library refactor was considered and rejected: it would couple two
-independently deployed images, so a bad release of one would break the other.
-This test is the cheaper substitute. It asserts that the *logic* which must
-agree really does agree, by comparing normalised source text, while explicitly
-allowing the parts that are legitimately different (the product name and URL
-environment variables).
-
-It also compares the *documentation scaffolding* - the guard names in
-``tests/test_docs.py``, the notes in ``.env.example`` and the README headings -
-because that is where the drift actually happened: the sibling's env sample lost
-a timeout note and its doc-test file fell six guards behind this one, and a
-source-only comparison could not see either.
-
-If this fails, the fix is to port the change to the sibling - not to relax the
-assertion. The expected shape of each twin is pinned below so that a silent
-rewrite of one side is caught rather than rubber-stamped.
+If it fails, port the change to the sibling - do not relax the assertion.
 """
 
 import os
@@ -39,16 +25,10 @@ SIBLING_DOC_TESTS_PATH = os.path.join(SIBLING_ROOT, 'tests', 'test_docs.py')
 SIBLING_ENV_EXAMPLE_PATH = os.path.join(SIBLING_ROOT, '.env.example')
 SIBLING_README_PATH = os.path.join(SIBLING_ROOT, 'README.md')
 
-# This module lives in the sonarr repo; the sibling only exists in a combined
-# checkout (the local /data/repos layout). Skip rather than fail when CI checks
-# out a single repository.
-#
-# In CI the sibling is always provisioned by the `parity` job, so a missing
-# sibling there means the checkout silently did not happen - and because pytest
-# exits 0 on a skip, that would report the job green while it asserted nothing.
-# A required status check that can pass without testing anything is worse than
-# no check at all, so enforce the sibling when CI asks for it (the parity job
-# sets PARITY_REQUIRE_SIBLING=1) and keep the quiet skip only for local runs.
+# The sibling only exists in a combined checkout, so skip when CI checks out a
+# single repository. The parity job sets PARITY_REQUIRE_SIBLING=1 to turn that
+# skip into a failure: pytest exits 0 on a skip, so a botched checkout would
+# otherwise report the required check green having asserted nothing.
 SIBLING_MISSING = not os.path.exists(SIBLING_PATH)
 REQUIRE_SIBLING = os.environ.get('PARITY_REQUIRE_SIBLING') == '1'
 
@@ -88,19 +68,14 @@ def _normalise(source):
     """
     text = source.replace('Radarr', 'PRODUCT').replace('radarr', 'product')
     text = text.replace('Sonarr', 'PRODUCT').replace('sonarr', 'product')
-    # The resource noun differs by product but the logic around it must not.
     text = re.sub(r'\bmovies?\b', 'RESOURCE', text, flags=re.IGNORECASE)
     text = re.sub(r'\bshows?\b', 'RESOURCE', text, flags=re.IGNORECASE)
-    # Movies use MANAGED_TAGS, series use REQUIRED_TAGS; same role.
     text = text.replace('MANAGED_TAGS', 'RESOURCE_TAGS')
     text = text.replace('REQUIRED_TAGS', 'RESOURCE_TAGS')
     text = re.sub(r'VERSION = "[^"]*"', 'VERSION = "X"', text)
-    # Each product names its own API-key variable in the message.
     text = re.sub(r'\b[A-Z]+_API_KEY\b', 'PRODUCT_API_KEY', text)
-    # Parameter names echo the resource noun (fresh_movie/fresh_show).
     text = re.sub(r'\bfresh_(?:movie|show)\b', 'fresh_resource', text)
-    # Docstrings explain the same rule in each product's own vocabulary; the
-    # executable code below them is what must stay in lockstep.
+    # Docstrings differ by product's vocabulary; only the code must match.
     text = re.sub(r'""".*?"""', '"""..."""', text, flags=re.DOTALL)
     text = re.sub(r"'''.*?'''", "'''...'''", text, flags=re.DOTALL)
     text = re.sub(r'#.*', '', text)              # drop comments
