@@ -3,7 +3,7 @@
 # the same versions. pytest 9 requires Python >= 3.9.
 pytest==9.1.1
 pytest-cov==7.1.0
-pylint==4.0.8
+pylint==4.0.9
 
 # tests/test_twin_parity.py parses .github/workflows/tests.yml rather than
 # matching its text (the file's own comments name `paths:`/`branches:`, and no
