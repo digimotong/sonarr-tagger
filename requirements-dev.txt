@@ -1,7 +1,7 @@
 -r requirements.txt
 # Pinned to match CI's interpreters (3.12, 3.13, 3.14) so local and CI resolve
 # the same versions. pytest 9 requires Python >= 3.9.
-pytest==9.1.1
+pytest==9.2.0
 pytest-cov==7.1.0
 pylint==4.1.3
 
