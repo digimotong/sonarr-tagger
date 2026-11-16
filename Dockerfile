@@ -1,6 +1,6 @@
 # Pinned to the Debian suite this tag resolves to, and to 3.14 because tests.yml
 # runs the suite on it: the shipped interpreter and the tested one must not drift.
-FROM python:3.14-slim-trixie
+FROM python:3.15-slim-trixie
 
 # docker logs is the only observability surface, so stdout must stay unbuffered.
 ENV PYTHONUNBUFFERED=1
