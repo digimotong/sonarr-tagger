@@ -8,4 +8,4 @@ pylint==4.1.4
 # tests/test_twin_parity.py parses .github/workflows/tests.yml rather than
 # matching its text (the file's own comments name `paths:`/`branches:`, and no
 # regex can see a job grow a `strategy:` block), so a YAML reader is required.
-pyyaml==6.0.3
+pyyaml==6.0.4
